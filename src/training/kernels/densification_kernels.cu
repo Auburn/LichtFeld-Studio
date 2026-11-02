@@ -728,8 +728,7 @@ namespace lfs::training::kernels {
             size_t frozen_n,
             float limit,
             size_t n,
-            int axis_mode,
-            float falloff) {
+            int axis_mode) {
             const size_t i = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
             if (i >= n)
                 return;
@@ -743,13 +742,6 @@ namespace lfs::training::kernels {
                 log_scales[i * 3 + 0],
                 log_scales[i * 3 + 1],
                 log_scales[i * 3 + 2]};
-            // weighted: every axis by delta * (s_i / s_max)^falloff (the hinge's weights).
-            if (axis_mode == lfs::training::kScreenShareAxisWeighted) {
-                const float lmax = fmaxf(scale[0], fmaxf(scale[1], scale[2]));
-                for (int a = 0; a < 3; ++a)
-                    log_scales[i * 3 + a] -= delta * lfs::training::screen_share_axis_weight(falloff, lmax, scale[a]);
-                return;
-            }
             // Shrink the axes the measured radius is made of: the longest (max), or both of the two longest
             // (area: their mean log-scale is the radius, so it drops by delta, as the max radius does).
             const int skip = lfs::training::screen_share_unpushed_axis(axis_mode, scale[0], scale[1], scale[2]);
@@ -773,8 +765,7 @@ namespace lfs::training::kernels {
         float limit,
         size_t n,
         cudaStream_t stream,
-        int axis_mode,
-        float falloff) {
+        int axis_mode) {
         LFS_ASSERT_MSG(log_scales != nullptr && max_share != nullptr,
                        "screen-share clip requires log_scales and max_share");
         if (n == 0 || !(limit > 0.0f) || !(limit < 1.0f))
@@ -783,7 +774,7 @@ namespace lfs::training::kernels {
         constexpr int kBlock = 256;
         const int blocks = static_cast<int>((n + kBlock - 1) / kBlock);
         clip_log_scale_by_screen_share_kernel<<<blocks, kBlock, 0, stream>>>(
-            log_scales, max_share, frozen_mask, frozen_n, limit, n, axis_mode, falloff);
+            log_scales, max_share, frozen_mask, frozen_n, limit, n, axis_mode);
         LFS_CUDA_LAUNCH_CHECK(stream, "training.densify.clip_screen_share");
     }
 

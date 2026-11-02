@@ -69,6 +69,7 @@ namespace fast_lfs::rasterization {
         float* impact_peak_out,
         cudaStream_t stream,
         const FastGSLens& lens = {},
-        const FastGSDistortion& distortion = {});
+        const FastGSDistortion& distortion = {},
+        const FastGSRollingShutter& rs = {});
 
 } // namespace fast_lfs::rasterization

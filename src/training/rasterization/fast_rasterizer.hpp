@@ -231,7 +231,10 @@ namespace lfs::training {
         // Radius the collected screen share measures (lfs/training/screen_share.cuh): kScreenShareAxisMax (0,
         // the longest axis) or kScreenShareAxisArea (1, area of the two longest). Must match the optimizer's
         // hinge (publish_screen_share_cap); training callers pass screen_share_axis_code(params).
-        int screen_share_axis = 0);
+        int screen_share_axis = 0,
+        // Dynamic rolling shutter (native fisheye; FastGSRollingShutter): device pointers to this camera's motion and the
+        // readout (training/rolling_shutter_motion.hpp makes them). Default: off, the unchanged kernels.
+        const fast_lfs::rasterization::FastGSRollingShutter& rolling_shutter = {});
 
     // Backward pass with optional extra alpha gradient for masked training
     void fast_rasterize_backward(

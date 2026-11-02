@@ -12,6 +12,7 @@
 #include "lfs/training/effective_rank.cuh"
 #include "lfs/training/mean_step_scale.cuh"
 #include "rasterization_config.h"
+#include "rolling_shutter.cuh"
 #include "utils.h"
 #include <cooperative_groups.h>
 #include <cstdint>
@@ -36,7 +37,7 @@ namespace fast_lfs::rasterization::kernels::backward {
 
     // minBlocks=3 budgets registers so shN Adam no longer lives across
     // the geometry backward (sweep 2..4; 3 is the measured default).
-    template <bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES = false, bool FISHEYE = false>
+    template <bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES = false, bool FISHEYE = false, bool RS = false>
     __global__ void __launch_bounds__(config::block_size_preprocess_backward, 3) preprocess_backward_cu(
         // These four alias fused_adam.{means,scaling,rotation,opacity}.param (Adam writes).
         const float3* means,
@@ -78,7 +79,10 @@ namespace fast_lfs::rasterization::kernels::backward {
         const FastGSLens lens,
         // depth distortion (null = off): dL/d(distortion depth) per model splat and how that depth was made
         const float* __restrict__ grad_distortion_depth,
-        const int distortion_depth_mode) {
+        const int distortion_depth_mode,
+        // dynamic rolling shutter (RS only): the forward's per-splat poses; rs.grad != null adds dL/d(motion, readout)
+        const FastGSRollingShutter rs) {
+        static_assert(!RS || FISHEYE, "the rolling shutter is implemented for the native fisheye path");
         (void)cx;
         (void)cy;
         auto primitive_idx = cg::this_grid().thread_rank();
@@ -297,17 +301,31 @@ namespace fast_lfs::rasterization::kernels::backward {
         }
         // sh0 / streamed shN Adam state is dead from here on (compiler can free it).
 
+        // rolling shutter: this thread's dL/d(motion[12], readout), summed over the block after the geometry
+        float rs_acc[13] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        (void)rs_acc;
+
         // Re-enter the visible-only path for covariance, EWA, and geometry gradients.
         if (visible) {
             const float3 mean3d = means[primitive_idx];
 
-            const float4 w2c_r3 = w2c[2];
+            // this splat's world-to-camera rows (rolling shutter: those of the pose at its capture time, as the forward)
+            float4 w2c_rows[3] = {w2c[0], w2c[1], w2c[2]};
+            rolling_shutter::Motion rs_motion{};
+            float rs_s = 0.0f;
+            (void)rs_s;
+            if constexpr (RS) {
+                rs_motion = rolling_shutter::load_motion(rs);
+                rs_s = rolling_shutter::splat_rows<FISHEYE>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows,
+                                                           static_cast<uint>(primitive_idx));
+            }
+            const float4 w2c_r3 = w2c_rows[2];
             const float depth = w2c_r3.x * mean3d.x + w2c_r3.y * mean3d.y + w2c_r3.z * mean3d.z + w2c_r3.w;
             const float depth_safe = fmaxf(depth, 1e-4f);
             const float inv_depth = 1.0f / depth_safe;
-            const float4 w2c_r1 = w2c[0];
+            const float4 w2c_r1 = w2c_rows[0];
             const float x = (w2c_r1.x * mean3d.x + w2c_r1.y * mean3d.y + w2c_r1.z * mean3d.z + w2c_r1.w) * inv_depth;
-            const float4 w2c_r2 = w2c[1];
+            const float4 w2c_r2 = w2c_rows[1];
             const float y = (w2c_r2.x * mean3d.x + w2c_r2.y * mean3d.y + w2c_r2.z * mean3d.z + w2c_r2.w) * inv_depth;
             // fisheye: the camera-space centre (visible means z > 0; the forward culled the rest)
             const float3 cam_p = FISHEYE
@@ -592,6 +610,35 @@ namespace fast_lfs::rasterization::kernels::backward {
                 }
             }
 
+            if constexpr (RS) {
+                if (rs.grad != nullptr) {
+                    // dL/dW' (rows) and dL/db' of this splat's rows W' = E W, b' = E (b - d): through its centre
+                    // p = W' x + b', its covariance (J W' Sigma W'^T J^T) and its normal (W' n)
+                    float3 GW[3];
+                    const float g_p[3] = {dL_dmean3d_cam.x, dL_dmean3d_cam.y, dL_dmean3d_cam.z};
+                    const float j1v[3] = {fish_j1.x, fish_j1.y, fish_j1.z};
+                    const float j2v[3] = {fish_j2.x, fish_j2.y, fish_j2.z};
+#pragma unroll
+                    for (int k = 0; k < 3; ++k)
+                        GW[k] = j1v[k] * dL_djw_r1 + j2v[k] * dL_djw_r2 + g_p[k] * mean3d;
+                    if (grad_normal != nullptr) {
+                        const float3 g_cam = grad_normal[work_idx];
+                        const float3 view_dir = mean3d - cam_position[0];
+                        const float3 axis = (variance.x <= variance.y && variance.x <= variance.z)
+                                                ? make_float3(rotation.m11, rotation.m21, rotation.m31)
+                                            : (variance.y <= variance.z)
+                                                ? make_float3(rotation.m12, rotation.m22, rotation.m32)
+                                                : make_float3(rotation.m13, rotation.m23, rotation.m33);
+                        const float3 n_world = dot(axis, view_dir) > 0.0f ? make_float3(-axis.x, -axis.y, -axis.z) : axis;
+                        GW[0] += g_cam.x * n_world;
+                        GW[1] += g_cam.y * n_world;
+                        GW[2] += g_cam.z * n_world;
+                    }
+                    const float4 mid_rows[3] = {w2c[0], w2c[1], w2c[2]};
+                    rolling_shutter::motion_grad(rs_motion, rs_s, mid_rows, GW, dL_dmean3d_cam, rs_acc);
+                }
+            }
+
             const float dL_dqxx = -dL_drotation.m22 - dL_drotation.m33;
             const float dL_dqyy = -dL_drotation.m11 - dL_drotation.m33;
             const float dL_dqzz = -dL_drotation.m11 - dL_drotation.m22;
@@ -614,6 +661,12 @@ namespace fast_lfs::rasterization::kernels::backward {
                 densification_info[n_primitives + primitive_idx] += length(dL_dmean2d * make_float2(0.5f * w, 0.5f * h));
             }
         } // visible geometry
+
+        // rolling shutter: one atomic per value per block (every thread of the block takes part; rs.grad is uniform)
+        if constexpr (RS) {
+            if (rs.grad != nullptr)
+                rolling_shutter::block_add13(rs_acc, rs.grad);
+        }
 
         if constexpr (DISABLED_FEATURES) {
             adam_step_row(mean_grads, fused_adam.means, primitive_idx, 3,

@@ -20,43 +20,12 @@ namespace lfs::training {
     //   kScreenShareAxisArea (1): the area-equivalent radius of the two longest axes, sqrt(s1 s2) = exp(mean of
     //     the two largest log-scales). A long thin splat (strap, rope, gate bar) no longer counts as big. Only the
     //     two axes that enter that radius are pushed (hinge) or shrunk (clip); the shortest axis is left alone.
-    //   kScreenShareAxisWeighted (2): measured as area. Every log-scale axis i is pushed (hinge) or shrunk (clip)
-    //     by the full step times w_i = exp(-K (log s_max - log s_i)) = (s_i / s_max)^K, K = --screen-share-falloff
-    //     (screen_share_axis_weight): the longest axis gets the full push, a round splat is pushed on all three
-    //     like max, a strap's width (1/30 of its length) gets 3% at K = 1 and its thickness nearly nothing.
-    //     K = 0: equal push on all three axes; large K: the longest axis only.
     // The GUT path measures a projected bounding-box area instead; there the axis setting is not used (max).
     inline constexpr int kScreenShareAxisMax = 0;
     inline constexpr int kScreenShareAxisArea = 1;
-    inline constexpr int kScreenShareAxisWeighted = 2;
-
-    // Whether the mode measures the area-equivalent radius (area and weighted) rather than the longest axis.
-    [[nodiscard]]
-#ifdef __CUDACC__
-    __host__ __device__
-#endif
-        inline bool screen_share_measures_area(const int axis_mode) {
-        return axis_mode == kScreenShareAxisArea || axis_mode == kScreenShareAxisWeighted;
-    }
-
-    // kScreenShareAxisWeighted: the push weight of an axis with log-scale log_s in a row whose largest log-scale
-    // is log_max: w = exp(-falloff (log_max - log_s)) = (s / s_max)^falloff, in (0, 1]; 1 for the longest axis (and
-    // for every axis with falloff 0). log_max and log_s are the values before this step's update.
-    [[nodiscard]]
-#ifdef __CUDACC__
-    __host__ __device__
-#endif
-        inline float screen_share_axis_weight(const float falloff, const float log_max, const float log_s) {
-#ifdef __CUDA_ARCH__
-        return expf(-falloff * (log_max - log_s));
-#else
-        return std::exp(-falloff * (log_max - log_s));
-#endif
-    }
 
     // Index of the log-scale axis that the cap leaves alone: the shortest one (the first on ties) with
-    // kScreenShareAxisArea and a 3-wide row, else -1 (every axis is pushed; with kScreenShareAxisWeighted each by
-    // its screen_share_axis_weight factor). Read the row before updating it.
+    // kScreenShareAxisArea and a 3-wide row, else -1 (every axis is pushed). Read the row before updating it.
     [[nodiscard]]
 #ifdef __CUDACC__
     __host__ __device__
@@ -70,8 +39,8 @@ namespace lfs::training {
 
     // Dimensionless angular / screen-share of a 3D Gaussian. Saturates toward 1
     // when the splat swallows the camera (d ≲ r). Host and device.
-    // axis_mode: kScreenShareAxisMax (radius = longest axis) or kScreenShareAxisArea / kScreenShareAxisWeighted
-    // (radius = sqrt of the product of the two longest axes, i.e. log radius = mean of the two largest log-scales).
+    // axis_mode: kScreenShareAxisMax (radius = longest axis) or kScreenShareAxisArea (radius = sqrt of the
+    // product of the two longest axes, i.e. log radius = mean of the two largest log-scales).
     [[nodiscard]]
 #ifdef __CUDACC__
     __host__ __device__
@@ -89,7 +58,7 @@ namespace lfs::training {
             const float opacity_raw,
             const int axis_mode = kScreenShareAxisMax) {
 #ifdef __CUDA_ARCH__
-        const float max_log = screen_share_measures_area(axis_mode)
+        const float max_log = axis_mode == kScreenShareAxisArea
                                   ? 0.5f * (log_sx + log_sy + log_sz - fminf(log_sx, fminf(log_sy, log_sz)))
                                   : fmaxf(log_sx, fmaxf(log_sy, log_sz));
         const float opacity = 1.0f / (1.0f + expf(-opacity_raw));
@@ -104,7 +73,7 @@ namespace lfs::training {
             return 0.0f;
         return fminf(fmaxf(r / denom, 0.0f), 1.0f);
 #else
-        const float max_log = screen_share_measures_area(axis_mode)
+        const float max_log = axis_mode == kScreenShareAxisArea
                                   ? 0.5f * (log_sx + log_sy + log_sz - std::fmin(log_sx, std::fmin(log_sy, log_sz)))
                                   : std::fmax(log_sx, std::fmax(log_sy, log_sz));
         const float opacity = 1.0f / (1.0f + std::exp(-opacity_raw));
@@ -149,8 +118,7 @@ namespace lfs::training {
     // (penalty * log2(share / limit) after Adam's normalisation). The caller applies it only to the axes that
     // enter the measured radius: all three with kScreenShareAxisMax (unchanged), the two longest with
     // kScreenShareAxisArea (skip i == screen_share_unpushed_axis(...)). Pushing both of those by the same step
-    // lowers the area radius at the rate the max mode lowers the longest axis. kScreenShareAxisWeighted: all
-    // three, axis i multiplied by screen_share_axis_weight(falloff, row max, log s_i).
+    // lowers the area radius at the rate the max mode lowers the longest axis.
     __device__ __forceinline__ float screen_share_hinge_extra_grad(
         const float share,
         const float limit,

@@ -56,8 +56,7 @@ namespace fast_lfs::optimizer {
         int screen_share_n = 0,
         float screen_share_limit = 0.0f,
         float screen_share_penalty = 0.0f,
-        int screen_share_axis = 0,          // lfs::training::kScreenShareAxisMax / Area / Weighted
-        float screen_share_falloff = 1.0f); // K of the weighted mode's per-axis push (s_i / s_max)^K
+        int screen_share_axis = 0); // lfs::training::kScreenShareAxisMax / kScreenShareAxisArea
 
     // One launch over a fixed-size value batch of contiguous joint params
     // (means/sh0/scale/rot/opa).
@@ -83,8 +82,7 @@ namespace fast_lfs::optimizer {
         int screen_share_n = 0,
         float screen_share_limit = 0.0f,
         float screen_share_penalty = 0.0f,
-        int screen_share_axis = 0,          // lfs::training::kScreenShareAxisMax / Area / Weighted
-        float screen_share_falloff = 1.0f); // K of the weighted mode's per-axis push (s_i / s_max)^K
+        int screen_share_axis = 0); // lfs::training::kScreenShareAxisMax / kScreenShareAxisArea
 
     // Standalone joint 8-bit shN Adam over a swizzled fp32 gradient buffer.
     // Reuses apply_shN_grads_packed_joint (same device code as fused FastGS).

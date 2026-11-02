@@ -573,6 +573,8 @@ namespace lfs::core {
             grow_until_iter = apply(grow_until_iter);
             opacity_binarize_start = apply(opacity_binarize_start);
             distortion_start = apply(distortion_start);
+            rs_learn_start = apply(rs_learn_start);
+            rs_motion_start = apply(rs_motion_start);
 
             for (auto* steps : {&eval_steps, &save_steps}) {
                 std::set<size_t> unique;
@@ -916,6 +918,15 @@ namespace lfs::core {
                 return std::format("generated_lowpass_sigma must be within [0, 10] (got {})", generated_lowpass_sigma);
             if (generated_texture_radius < 1 || generated_texture_radius > 32)
                 return std::format("generated_texture_radius must be within [1, 32] (got {})", generated_texture_radius);
+            if (!std::isfinite(rs_readout_ms) || rs_readout_ms < 0.0f || rs_readout_ms > 100.0f)
+                return std::format("rs_readout_ms must be within [0, 100] (got {})", rs_readout_ms);
+            if (!std::isfinite(rs_lr) || rs_lr < 0.0f || !std::isfinite(rs_readout_lr) || rs_readout_lr < 0.0f ||
+                !std::isfinite(rs_prior) || rs_prior < 0.0f || !std::isfinite(rs_smooth) || rs_smooth < 0.0f)
+                return "rs_lr, rs_readout_lr, rs_prior and rs_smooth must be finite and nonnegative";
+            if (rs_learn_start > MAX_ITERATION_VALUE)
+                return std::format("rs_learn_start must be within [0, {}] (got {})", MAX_ITERATION_VALUE, rs_learn_start);
+            if (rs_motion_start > MAX_ITERATION_VALUE)
+                return std::format("rs_motion_start must be within [0, {}] (got {})", MAX_ITERATION_VALUE, rs_motion_start);
             if (growth_visit_stat != "mean" && growth_visit_stat != "weighted")
                 return std::format("growth_visit_stat must be 'mean' or 'weighted' (got '{}')", growth_visit_stat);
             if (max_cap < 0)
@@ -975,10 +986,8 @@ namespace lfs::core {
                 return std::format("steps_scaler must be finite (got {})", steps_scaler);
             if (!std::isfinite(max_screen_share))
                 return std::format("max_screen_share must be finite (got {})", max_screen_share);
-            if (screen_share_axis != "max" && screen_share_axis != "area" && screen_share_axis != "weighted")
-                return std::format("screen_share_axis must be 'max', 'area' or 'weighted' (got '{}')", screen_share_axis);
-            if (!std::isfinite(screen_share_falloff) || screen_share_falloff < 0.0f)
-                return std::format("screen_share_falloff must be finite and >= 0 (got {})", screen_share_falloff);
+            if (screen_share_axis != "max" && screen_share_axis != "area")
+                return std::format("screen_share_axis must be 'max' or 'area' (got '{}')", screen_share_axis);
             if (ppisp_holdout_appearance != PPISPHoldoutAppearance::Mean && ppisp_holdout_appearance != PPISPHoldoutAppearance::Nearest)
                 return "ppisp_holdout_appearance must be mean or nearest";
             if (!std::isfinite(densify_structure_weight) || densify_structure_weight < 0.0f || densify_structure_weight > 4.0f)

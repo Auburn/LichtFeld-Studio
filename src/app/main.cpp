@@ -43,6 +43,8 @@ namespace lfs::app {
     int run_lfe_genloss_tool(int argc, const char* const* argv);
     // Developer check of the per-pixel loss weights (lfe_lossweight_tool.cpp).
     int run_lfe_lossweight_tool(int argc, const char* const* argv);
+    // Developer checks of the dynamic rolling shutter (lfe_rs_tool.cpp).
+    int run_lfe_rs_tool(int argc, const char* const* argv);
 } // namespace lfs::app
 
 namespace {
@@ -252,6 +254,8 @@ int main(int argc, char* argv[]) {
         return lfs::app::run_lfe_genloss_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-lossweight")
         return lfs::app::run_lfe_lossweight_tool(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "lfe-rs")
+        return lfs::app::run_lfe_rs_tool(argc, argv);
 
     auto result = lfs::core::args::parse_args(argc, argv);
     if (!result) {

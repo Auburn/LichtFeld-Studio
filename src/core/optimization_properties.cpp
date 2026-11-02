@@ -282,6 +282,65 @@ namespace lfs::core::param {
                          "Folder of per-pixel photometric loss weight maps, <image name>.png per training image (16-bit PNG, weight = value / 10000, or float EXR/TIFF); they multiply the per-pixel L1 + SSIM and the densification error map; a missing map is weight 1; empty turns it off")
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .string_prop(&OptimizationParameters::rolling_shutter,
+                         "rolling_shutter", "Rolling Shutter Motion File", d.rolling_shutter,
+                         "Dynamic rolling shutter (--native-fisheye): file of per-image motion during the readout (name, angular velocity, angular acceleration, linear velocity, linear acceleration in the mid-readout camera axes); every splat is drawn through the pose of the time its sensor row was read; empty turns it off")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::rs_readout_ms,
+                        "rs_readout_ms", "Rolling Shutter Readout", d.rs_readout_ms, 0.0f, 100.0f,
+                        "Rolling shutter readout time from the top row to the bottom row (ms)")
+            .precision(2)
+            .ui_step(1.0)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .string_prop(&OptimizationParameters::rs_learn,
+                         "rs_learn", "Rolling Shutter Learn", d.rs_learn,
+                         "Rolling shutter quantities refined during training: comma list of omega, alpha, vel, acc, readout (empty = the motion file and readout are used as they are)")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::rs_lr,
+                        "rs_lr", "Rolling Shutter Motion LR", d.rs_lr, 0.0f, 10.0f,
+                        "Adam step of the per-camera rolling-shutter motion corrections, in pixels at the readout ends per camera update")
+            .precision(4)
+            .ui_step(0.01)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::rs_readout_lr,
+                        "rs_readout_lr", "Rolling Shutter Readout LR", d.rs_readout_lr, 0.0f, 1.0f,
+                        "Adam step of the shared rolling-shutter readout time (ms per iteration)")
+            .precision(4)
+            .ui_step(0.001)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::rs_prior,
+                        "rs_prior", "Rolling Shutter Motion Prior", d.rs_prior, 0.0f, 1.0f,
+                        "Weight of the prior pulling each camera's rolling-shutter motion correction (pixels at the readout ends) to zero")
+            .precision(6)
+            .ui_step(0.0001)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::rs_smooth,
+                        "rs_smooth", "Rolling Shutter Smoothness", d.rs_smooth, 0.0f, 1.0f,
+                        "Weight tying each camera's rolling-shutter motion correction to its time neighbours' (adjacent training images at most 12 video frames apart)")
+            .precision(6)
+            .ui_step(0.0001)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .size_prop(&OptimizationParameters::rs_learn_start,
+                       "rs_learn_start", "Rolling Shutter Learn Start", d.rs_learn_start, 0, 1000000,
+                       "Iteration from which the rolling-shutter motion / readout are refined")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .size_prop(&OptimizationParameters::rs_motion_start,
+                       "rs_motion_start", "Rolling Shutter Motion Start", d.rs_motion_start, 0, 1000000,
+                       "With the readout and the motion both learned: the readout is learned until this iteration and the per-camera motion from it on (0 = both from the learn start)")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .float_prop(&OptimizationParameters::scale_reg,
                         "scale_reg", "Scale Reg", d.scale_reg, 0.0f, 1.0f,
                         "Scale regularization weight")
@@ -788,14 +847,7 @@ namespace lfs::core::param {
             .all_strategies()
             .string_prop(&OptimizationParameters::screen_share_axis,
                          "screen_share_axis", "Screen Share Axis", d.screen_share_axis,
-                         "Splat radius the screen-share cap measures: max (its longest axis, default) or area (the area-equivalent radius of its two longest axes, so long thin splats such as straps and ropes are not shrunk; the shortest axis is never pushed) or weighted (measured as area; every axis is pushed by (s_i / s_max)^falloff, so the longest axis takes the push and a strap keeps its width). Standard rasterizer only")
-            .flags(PROP_ADVANCED)
-            .all_strategies()
-            .float_prop(&OptimizationParameters::screen_share_falloff,
-                        "screen_share_falloff", "Screen Share Falloff", d.screen_share_falloff, 0.0f, 100.0f,
-                        "Screen share axis weighted: axis i is pushed by (s_i / s_max)^K of the step; 0 = all axes equally, large = the longest axis only")
-            .precision(2)
-            .ui_step(0.25)
+                         "Splat radius the screen-share cap measures: max (its longest axis, default) or area (the area-equivalent radius of its two longest axes, so long thin splats such as straps and ropes are not shrunk; the shortest axis is never pushed). Standard rasterizer only")
             .flags(PROP_ADVANCED)
             .all_strategies()
             .bool_prop(&OptimizationParameters::use_edge_map,

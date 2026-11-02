@@ -86,6 +86,26 @@ namespace fast_lfs::rasterization {
         float plane_sigma = 2.0f; // 0 = no splat is left out
         float min_dist = 0.0f;    // splats with distortion depth < min_dist are left out; 0 = none
     };
+
+    // Dynamic rolling shutter (2026-11-02; native fisheye only). Sensor row v (this render's pixels, pixel centres at
+    // +0.5) is read at t = clamp((v + row_offset) / H - 1/2, -1/2, 1/2) tau, top row first (H = sensor_height, or the
+    // render height when 0). The camera at time t relative to its mid-readout pose (the w2c the rasterizer is given):
+    // camera-space p(t) = E(t) (p_mid - d(t)), E = exp(-[r(t)]x), r(t) = omega t + alpha t^2 / 2, d(t) = vel t + acc t^2 / 2
+    // (mid-readout camera axes). Each splat is drawn at ONE time, the fixed point of its centre's row (iters
+    // re-projections from the mid pose): its centre, covariance, depth and normal go through that pose; colours (SH)
+    // keep the mid-readout camera centre. The backward holds each splat's time fixed and, when grad is bound, adds
+    // dL/d(motion, tau). motion == nullptr = off: the unchanged kernels run. See rolling_shutter.cuh.
+    struct FastGSRollingShutter {
+        const float* motion = nullptr;  // device [12]: omega, alpha, vel, acc (rad/s, rad/s^2, units/s, units/s^2)
+        const float* readout = nullptr; // device [1]: tau in seconds (required with motion)
+        float* grad = nullptr;          // device [13] optional: the backward adds dL/d(motion[12]) and dL/dtau (caller zeros)
+        float* times = nullptr;         // device [N] optional (checks): per model splat row fraction s (t = s tau); the
+                                        // forward writes it for the splats it draws, or reads it when times_fixed != 0
+        int times_fixed = 0;
+        int iters = 2;                  // fixed-point re-projections (>= 1)
+        float row_offset = 0.0f;        // sensor rows above this render's row 0 (tiled renders)
+        float sensor_height = 0.0f;     // sensor rows in this render's pixels (0 = the render height)
+    };
 } // namespace fast_lfs::rasterization
 
 namespace fast_lfs::rasterization::config {

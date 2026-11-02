@@ -1781,44 +1781,6 @@ namespace lfs::training {
                  std_target > 0.0f ? std_render / std_target : 0.0f, real_loss, static_cast<int>(real_views));
     }
 
-    namespace {
-        // LFS_LOSS_WEIGHT_DUMP=<folder> (debug check of --loss-weight-dir, default off): the first
-        // LFS_LOSS_WEIGHT_DUMP_N (default 4) weighted views' combined per-pixel weight, exactly as the loss uses it
-        // (the map resampled to the render size x the mask / ROI weight, border zeroed when it applies), is written as
-        // <folder>/<image name>.f32: int32 width, int32 height, float32 loss denominator, then height x width float32
-        // (row-major). Host copy, so it syncs the stream; for checks only.
-        std::string g_loss_weight_dump_name;
-        int g_loss_weight_dumped = 0;
-
-        void maybe_dump_loss_weight(const lfs::core::Tensor& weight, const float denominator) {
-            static const char* const dir = std::getenv("LFS_LOSS_WEIGHT_DUMP");
-            if (dir == nullptr || *dir == '\0' || !weight.is_valid() || weight.ndim() != 2)
-                return;
-            static const int limit = [] {
-                const char* n = std::getenv("LFS_LOSS_WEIGHT_DUMP_N");
-                return n != nullptr ? std::max(0, std::atoi(n)) : 4;
-            }();
-            if (g_loss_weight_dumped >= limit)
-                return;
-            ++g_loss_weight_dumped;
-            const auto host = weight.contiguous().cpu();
-            const int h = static_cast<int>(host.shape()[0]);
-            const int w = static_cast<int>(host.shape()[1]);
-            const auto folder = lfs::core::utf8_to_path(dir);
-            std::error_code ec;
-            std::filesystem::create_directories(folder, ec);
-            const auto path = folder / lfs::core::utf8_to_path(g_loss_weight_dump_name + ".f32");
-            std::ofstream f(path, std::ios::binary);
-            f.write(reinterpret_cast<const char*>(&w), sizeof(w));
-            f.write(reinterpret_cast<const char*>(&h), sizeof(h));
-            f.write(reinterpret_cast<const char*>(&denominator), sizeof(denominator));
-            f.write(reinterpret_cast<const char*>(host.ptr<float>()),
-                    static_cast<std::streamsize>(sizeof(float)) * w * h);
-            LOG_INFO("Loss weights: dumped the combined weight of '{}' ({}x{}, loss denominator {}) to {}",
-                     g_loss_weight_dump_name, w, h, denominator, lfs::core::path_to_utf8(path));
-        }
-    } // namespace
-
     std::expected<void, std::string> Trainer::load_loss_weight_maps() {
         loss_weight_maps_.clear();
         loss_weight_log_views_ = loss_weight_log_weighted_ = 0;
@@ -1978,7 +1940,6 @@ namespace lfs::training {
             return {};
         }
         const auto& map = it->second;
-        g_loss_weight_dump_name = camera.image_name(); // LFS_LOSS_WEIGHT_DUMP only
         using namespace lfs::core;
         const cudaStream_t stream = getCurrentCUDAStream();
         const TensorShape source_shape{static_cast<size_t>(map.height), static_cast<size_t>(map.width)};
@@ -2162,7 +2123,6 @@ namespace lfs::training {
                     base, static_cast<int>(gt_image.shape()[1]), static_cast<int>(gt_image.shape()[2]),
                     valid_padding);
             }
-            maybe_dump_loss_weight(photometric_weight, base_denominator);
         }
 
         Tensor loss, grad_corrected, grad_alpha;
@@ -3424,6 +3384,30 @@ namespace lfs::training {
                          native);
             }
 
+            // Dynamic rolling shutter (--rolling-shutter; native fisheye standard rasterizer only)
+            rolling_shutter_.reset();
+            if (!params.optimization.rolling_shutter.empty()) {
+                if (params.optimization.gut || !params.optimization.native_fisheye)
+                    return std::unexpected("--rolling-shutter needs --native-fisheye (the standard rasterizer), not --gut");
+                RollingShutterSettings rs_settings;
+                rs_settings.path = params.optimization.rolling_shutter;
+                rs_settings.readout_ms = params.optimization.rs_readout_ms;
+                rs_settings.learn = params.optimization.rs_learn;
+                rs_settings.lr = params.optimization.rs_lr;
+                rs_settings.readout_lr_ms = params.optimization.rs_readout_lr;
+                rs_settings.prior = params.optimization.rs_prior;
+                rs_settings.smooth = params.optimization.rs_smooth;
+                rs_settings.learn_start = static_cast<int>(params.optimization.rs_learn_start);
+                rs_settings.motion_start = static_cast<int>(params.optimization.rs_motion_start);
+                if (const char* it = std::getenv("LFS_RS_ITERS"); it != nullptr && *it)
+                    rs_settings.iters = std::max(1, std::atoi(it));
+                auto created = RollingShutterMotion::create(rs_settings, train_dataset_->get_cameras());
+                if (!created)
+                    return std::unexpected(created.error());
+                rolling_shutter_ = std::move(*created);
+                LOG_INFO("{}", rolling_shutter_->description());
+            }
+
             // Initialize background color tensor from params
             {
                 const auto& bg_color = params.optimization.bg_color;
@@ -3602,22 +3586,15 @@ namespace lfs::training {
                 LOG_INFO("Opacity binarize loss: weight {} from iteration {}",
                          params.optimization.opacity_binarize_weight, params.optimization.opacity_binarize_start);
             if (screen_share_cap_active(params.optimization.max_screen_share)) {
-                if (params.optimization.screen_share_axis != "max" && params.optimization.gut)
-                    LOG_WARN("screen_share_axis {} needs the standard rasterizer (GUT measures a projected box area); "
-                             "the longest axis is used with --gut",
-                             params.optimization.screen_share_axis);
-                const int ss_axis = screen_share_axis_code(params.optimization);
+                if (params.optimization.screen_share_axis == "area" && params.optimization.gut)
+                    LOG_WARN("screen_share_axis area needs the standard rasterizer (GUT measures a projected box area); "
+                             "the longest axis is used with --gut");
                 LOG_INFO("Screen-share cap {} (penalty {}), measured on the {}",
                          params.optimization.max_screen_share, params.optimization.screen_share_penalty,
-                         ss_axis == kScreenShareAxisWeighted
-                             ? std::format("area radius of the two longest axes; every axis pushed by (s_i / s_max)^{} "
-                                           "(screen_share_axis weighted, falloff {})",
-                                           params.optimization.screen_share_falloff,
-                                           params.optimization.screen_share_falloff)
-                         : ss_axis == kScreenShareAxisArea
-                             ? std::string("area radius of the two longest axes (screen_share_axis area; the shortest "
-                                           "axis is never shrunk)")
-                             : std::string("longest axis (screen_share_axis max)"));
+                         screen_share_axis_code(params.optimization) == kScreenShareAxisArea
+                             ? "area radius of the two longest axes (screen_share_axis area; the shortest axis is "
+                               "never shrunk)"
+                             : "longest axis (screen_share_axis max)");
             }
             if (params.optimization.distortion_weight > 0.0f) {
                 if (params.optimization.gut)
@@ -7258,13 +7235,20 @@ namespace lfs::training {
                                         (step_params.distortion_skip_plane_crossing > 0.0f || step_params.distortion_min_dist > 0.0f) &&
                                         iter % kExtraLossLogInterval == 0;
                                 }
+                                fast_lfs::rasterization::FastGSRollingShutter rolling_shutter_options{};
+                                if (rolling_shutter_)
+                                    rolling_shutter_options = rolling_shutter_->options_for(
+                                        *cam, iter,
+                                        lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
+                                                                          : strategy_->get_model().means().stream());
                                 auto rasterize_result = fast_rasterize_forward(
                                     *cam, strategy_->get_model(), bg,
                                     0, 0, 0, 0,
                                     step_params.mip_filter, bg_tile,
                                     render_normal, render_depth,
                                     1.0f, true, distortion_options,
-                                    screen_share_axis_code(step_params));
+                                    screen_share_axis_code(step_params),
+                                    rolling_shutter_options);
                                 if (rasterize_result) {
                                     output = std::move(rasterize_result->first);
                                     fast_ctx.emplace(std::move(rasterize_result->second));
@@ -8508,6 +8492,10 @@ namespace lfs::training {
                                                             fused_extra_gradients,
                                                             tile_grad_depth,
                                                             tile_grad_normal, in_popspa);
+                                    if (rolling_shutter_) // the camera's motion / readout Adam step (device; no-op unless learning)
+                                        rolling_shutter_->step(*cam, iter,
+                                                               lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
+                                                                                                 : strategy_->get_model().means().stream());
                                     if (fused_extra_gradients.edge_score_out != nullptr) {
                                         strategy_->on_edge_score_accumulated(iter);
                                     }
@@ -8678,6 +8666,16 @@ namespace lfs::training {
                         log_generated_view_loss(iter); // means since the last log; synchronizes at this cadence only
                     if (!loss_weight_maps_.empty() && iter % kExtraLossLogInterval == 0)
                         log_loss_weights(iter); // host-side sums only
+                    if (rolling_shutter_ && rolling_shutter_->learning() &&
+                        (iter % 1000 == 0 || iter >= get_total_iterations())) {
+                        // synchronous readback at this cadence only; the learned file is rewritten each time
+                        const cudaStream_t rs_stream = lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
+                                                                                         : strategy_->get_model().means().stream();
+                        LOG_INFO("iter {}: {}", iter, rolling_shutter_->summary(rs_stream));
+                        std::string rs_error;
+                        if (!rolling_shutter_->save(params_.dataset.output_path / "rs_motion_learned.txt", rs_stream, rs_error))
+                            LOG_ERROR("rolling shutter: {}", rs_error);
+                    }
 
                     if (!in_popspa && bilateral_grid_ && step_params.bilateral_grid_active()) {
                         const bool grid_active_this_iter =

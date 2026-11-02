@@ -226,13 +226,7 @@ namespace lfs::training {
     // --screen-share-axis). The GUT path collects a projected bounding-box area instead, which this setting does
     // not change, so it stays kScreenShareAxisMax there. Every share producer and consumer must use this value.
     [[nodiscard]] inline int screen_share_axis_code(const lfs::core::param::OptimizationParameters& params) {
-        if (params.gut)
-            return kScreenShareAxisMax;
-        if (params.screen_share_axis == "area")
-            return kScreenShareAxisArea;
-        if (params.screen_share_axis == "weighted")
-            return kScreenShareAxisWeighted;
-        return kScreenShareAxisMax;
+        return (!params.gut && params.screen_share_axis == "area") ? kScreenShareAxisArea : kScreenShareAxisMax;
     }
 
     inline void publish_screen_share_cap(
@@ -253,8 +247,7 @@ namespace lfs::training {
             static_cast<int>(splat._max_screen_share.numel()),
             params.max_screen_share,
             params.screen_share_penalty * penalty_scale,
-            screen_share_axis_code(params),
-            params.screen_share_falloff);
+            screen_share_axis_code(params));
     }
 
     /// Collect leftover per-primitive Adam scale pointers from the removed

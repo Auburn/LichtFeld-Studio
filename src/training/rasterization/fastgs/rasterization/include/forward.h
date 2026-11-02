@@ -97,6 +97,7 @@ namespace fast_lfs::rasterization {
         float dilation_scale = 1.0f,
         const FastGSLens& lens = {},
         const FastGSDistortion& distortion = {},
-        int screen_share_axis = 0); // radius max_screen_share measures: 0 longest axis, 1 area of the two longest (lfs/training/screen_share.cuh)
+        int screen_share_axis = 0, // radius max_screen_share measures: 0 longest axis, 1 area of the two longest (lfs/training/screen_share.cuh)
+        const FastGSRollingShutter& rs = {}); // dynamic rolling shutter (native fisheye); off unless rs.motion != nullptr
 
 } // namespace fast_lfs::rasterization

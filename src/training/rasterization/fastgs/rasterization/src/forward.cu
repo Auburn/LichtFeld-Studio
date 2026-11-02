@@ -203,10 +203,13 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
     float dilation_scale,
     const FastGSLens& lens,
     const FastGSDistortion& distortion,
-    const int screen_share_axis) {
+    const int screen_share_axis,
+    const FastGSRollingShutter& rs) {
 
     if (distortion.moments != nullptr && (distortion.depths == nullptr || distortion.grad_depths == nullptr))
         throw std::runtime_error("FastGS depth distortion: the per-splat depths and grad_depths buffers must be bound with the moments");
+    if (rs.motion != nullptr && (rs.readout == nullptr || lens.model != kLensFisheye))
+        throw std::runtime_error("FastGS rolling shutter: needs the readout buffer and the native fisheye lens");
 
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const uint64_t n_tiles_u64 = static_cast<uint64_t>(grid.x) * static_cast<uint64_t>(grid.y);
@@ -253,8 +256,9 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
                                  float* screen_share,
                                  const FastGSDistortion& preprocess_distortion) {
         auto* const preprocess_kernel = lens.model == kLensFisheye
-                                            ? kernels::forward::preprocess_cu<true>
-                                            : kernels::forward::preprocess_cu<false>;
+                                            ? (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true>
+                                                                    : kernels::forward::preprocess_cu<true, false>)
+                                            : kernels::forward::preprocess_cu<false, false>;
         preprocess_kernel<<<div_round_up(n_work_items, static_cast<uint>(config::block_size_preprocess)), config::block_size_preprocess, 0, stream>>>(
             means,
             scales_raw,
@@ -300,7 +304,8 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
             screen_share,
             lens,
             preprocess_distortion,
-            screen_share_axis);
+            screen_share_axis,
+            rs);
         LFS_CUDA_LAUNCH_CHECK(stream, "fastgs.forward.preprocess");
     };
 

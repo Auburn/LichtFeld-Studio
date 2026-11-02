@@ -11,6 +11,7 @@
 #include "lfs/core/warp_reduce.cuh"
 #include "lfs/training/screen_share.cuh"
 #include "rasterization_config.h"
+#include "rolling_shutter.cuh"
 #include "utils.h"
 #include <cooperative_groups.h>
 #include <cstdint>
@@ -46,7 +47,7 @@ namespace fast_lfs::rasterization::kernels::forward {
         return (static_cast<InstanceKey>(tile_key) << kInstanceDepthBits) | static_cast<InstanceKey>(depth_key);
     }
 
-    template <bool FISHEYE>
+    template <bool FISHEYE, bool RS = false>
     __global__ void preprocess_cu(
         const float3* __restrict__ means,
         const float3* __restrict__ raw_scales,
@@ -92,7 +93,9 @@ namespace fast_lfs::rasterization::kernels::forward {
         float* __restrict__ max_screen_share,
         const FastGSLens lens,
         const FastGSDistortion distortion,
-        const int screen_share_axis) { // lfs::training::kScreenShareAxisMax / kScreenShareAxisArea
+        const int screen_share_axis, // lfs::training::kScreenShareAxisMax / kScreenShareAxisArea
+        const FastGSRollingShutter rs) { // rolling shutter (RS only)
+        static_assert(!RS || FISHEYE, "the rolling shutter is implemented for the native fisheye path");
         (void)w;
         (void)h;
         auto work_idx = cg::this_grid().thread_rank();
@@ -113,14 +116,23 @@ namespace fast_lfs::rasterization::kernels::forward {
         // load 3d mean
         const float3 mean3d = means[primitive_idx];
 
+        // this splat's world-to-camera rows (rolling shutter: those of the pose at its capture time)
+        float4 w2c_rows[3] = {w2c[0], w2c[1], w2c[2]};
+        if constexpr (RS) {
+            const auto rs_motion = rolling_shutter::load_motion(rs);
+            const float rs_s = rolling_shutter::splat_rows<FISHEYE>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows, primitive_idx);
+            if (rs.times != nullptr && rs.times_fixed == 0 && active)
+                rs.times[primitive_idx] = rs_s;
+        }
+
         // z culling (fisheye: distance from the camera, in front of it, within theta_max of the axis)
-        const float4 w2c_r3 = w2c[2];
+        const float4 w2c_r3 = w2c_rows[2];
         const float cam_z = w2c_r3.x * mean3d.x + w2c_r3.y * mean3d.y + w2c_r3.z * mean3d.z + w2c_r3.w;
         float depth = cam_z;
         float3 cam_p = make_float3(0.0f, 0.0f, 1.0f);
         if constexpr (FISHEYE) {
-            const float4 r1 = w2c[0];
-            const float4 r2 = w2c[1];
+            const float4 r1 = w2c_rows[0];
+            const float4 r2 = w2c_rows[1];
             cam_p = make_float3(
                 r1.x * mean3d.x + r1.y * mean3d.y + r1.z * mean3d.z + r1.w,
                 r2.x * mean3d.x + r2.y * mean3d.y + r2.z * mean3d.z + r2.w,
@@ -191,8 +203,8 @@ namespace fast_lfs::rasterization::kernels::forward {
             rotation_scaled.m31 * rotation.m31 + rotation_scaled.m32 * rotation.m32 + rotation_scaled.m33 * rotation.m33,
         };
 
-        const float4 w2c_r1 = w2c[0];
-        const float4 w2c_r2 = w2c[1];
+        const float4 w2c_r1 = w2c_rows[0];
+        const float4 w2c_r2 = w2c_rows[1];
         float2 mean2d;
         float3 jw_r1, jw_r2;
         if constexpr (FISHEYE) {

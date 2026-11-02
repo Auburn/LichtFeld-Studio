@@ -368,20 +368,13 @@ namespace fast_lfs::rasterization::kernels {
         float us_u[MAX_FUSED_ADAM_ATTRIBUTES];
         float us_s[MAX_FUSED_ADAM_ATTRIBUTES];
 
-        // --screen-share-axis area: the hinge leaves the shortest log-scale axis alone; weighted: it scales axis i by
-        // w_i = (s_i / s_max)^falloff (row read before the update).
+        // --screen-share-axis area: the hinge leaves the shortest log-scale axis alone (row read before the update).
         int share_skip_axis = -1;
-        bool share_weighted = false;
-        float share_log_max = 0.0f;
-        if (touch && apply_step && lfs::training::screen_share_measures_area(param.screen_share_axis) &&
+        if (touch && apply_step && param.screen_share_axis == lfs::training::kScreenShareAxisArea &&
             param.screen_share_max != nullptr && primitive_idx < static_cast<uint>(param.screen_share_n) &&
             n_attr == 3u && row == 3u) {
             const float* const ls = param.param + base;
             share_skip_axis = lfs::training::screen_share_unpushed_axis(param.screen_share_axis, ls[0], ls[1], ls[2]);
-            if (param.screen_share_axis == lfs::training::kScreenShareAxisWeighted) {
-                share_log_max = fmaxf(ls[0], fmaxf(ls[1], ls[2]));
-                share_weighted = true;
-            }
         }
 
         if (touch) {
@@ -404,9 +397,6 @@ namespace fast_lfs::rasterization::kernels {
                             mv.y,
                             param.bias_correction2_sqrt_rcp,
                             eps);
-                        if (share_weighted)   // axis i is not updated yet: its pre-update log-scale
-                            hinge *= lfs::training::screen_share_axis_weight(
-                                param.screen_share_falloff, share_log_max, param.param[base + i]);
                     }
                     m = beta1 * mv.x + (1.0f - beta1) * (grad + hinge);
                     v = beta2 * mv.y + (1.0f - beta2) * grad * grad;

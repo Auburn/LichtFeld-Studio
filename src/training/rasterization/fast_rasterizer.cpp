@@ -60,7 +60,6 @@ namespace lfs::training {
             dst.screen_share_limit = src.screen_share_limit;
             dst.screen_share_penalty = src.screen_share_penalty;
             dst.screen_share_axis = src.screen_share_axis;
-            dst.screen_share_falloff = src.screen_share_falloff;
             return dst;
         };
         fused_adam.enabled = optimizer_fused.enabled;
@@ -414,7 +413,8 @@ namespace lfs::training {
         float dilation_scale,
         bool update_screen_share,
         const FastGSDistortionOptions& distortion_options,
-        int screen_share_axis) {
+        int screen_share_axis,
+        const fast_lfs::rasterization::FastGSRollingShutter& rolling_shutter) {
         // Get camera parameters
         const int full_width = viewpoint_camera.image_width();
         const int full_height = viewpoint_camera.image_height();
@@ -623,7 +623,8 @@ namespace lfs::training {
                 dilation_scale,
                 fastgs_lens_for_camera(viewpoint_camera),
                 distortion,
-                screen_share_axis);
+                screen_share_axis,
+                rolling_shutter);
         } catch (const std::exception& e) {
             // Dump all input data for debugging
             dump_crash_data(

@@ -50,6 +50,9 @@ namespace fast_lfs::rasterization {
         // Depth distortion buffers bound by the forward (off unless moments != nullptr); the
         // backward adds the same loss's gradients.
         FastGSDistortion distortion{};
+        // Dynamic rolling shutter the forward drew with (off unless rs.motion != nullptr); the backward uses the same
+        // per-splat poses and, when rs.grad is bound, adds dL/d(motion, readout).
+        FastGSRollingShutter rs{};
         uint64_t frame_id = 0;
         // The stream all of this context's kernels/allocations are ordered on;
         // releases (sorted indices, arena frame, helper buffers) must use it.
@@ -110,7 +113,8 @@ namespace fast_lfs::rasterization {
         float dilation_scale = 1.0f,
         const FastGSLens& lens = {},               // pinhole unless lens.model == kLensFisheye
         const FastGSDistortion& distortion = {},  // depth distortion loss; off unless distortion.moments != nullptr
-        int screen_share_axis = 0);               // radius max_screen_share_ptr measures: 0 longest axis, 1 area of the two longest
+        int screen_share_axis = 0,                // radius max_screen_share_ptr measures: 0 longest axis, 1 area of the two longest
+        const FastGSRollingShutter& rs = {});     // dynamic rolling shutter (native fisheye); off unless rs.motion != nullptr
 
     void release_forward_context(const ForwardContext& forward_ctx);
 

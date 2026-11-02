@@ -41,7 +41,6 @@ namespace fast_lfs::rasterization {
         float screen_share_limit = 0.0f;
         float screen_share_penalty = 0.0f;
         int screen_share_axis = 0; // 0 max: hinge pushes all 3 log-scales; 1 area: not the shortest (screen_share.cuh)
-        float screen_share_falloff = 1.0f; // 2 weighted: axis i pushed by (s_i / s_max)^falloff
     };
 
     struct FusedAdamSettings {

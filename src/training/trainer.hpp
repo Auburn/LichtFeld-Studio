@@ -26,6 +26,7 @@
 #include "metrics/metrics.hpp"
 #include "optimizer/scheduler.hpp"
 #include "progress.hpp"
+#include "rolling_shutter_motion.hpp"
 #include "project_snapshot_chapters.hpp"
 #include "strategies/istrategy.hpp"
 #include "training_cropbox_mask.hpp"
@@ -1073,6 +1074,8 @@ namespace lfs::training {
             float max = 1.0f;
         };
         std::unordered_map<int, LossWeightMap> loss_weight_maps_;
+        // --rolling-shutter: the dynamic rolling shutter's per-camera motion and readout (rolling_shutter_motion.hpp); null = off
+        std::unique_ptr<RollingShutterMotion> rolling_shutter_;
         core::Tensor loss_weight_source_;
         core::Tensor loss_weight_map_;
         core::Tensor loss_weight_combined_;

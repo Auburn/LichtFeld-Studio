@@ -780,8 +780,7 @@ namespace lfs::training {
                     _params->max_screen_share,
                     n_clip,
                     nullptr,
-                    screen_share_axis_code(*_params),
-                    _params->screen_share_falloff);
+                    screen_share_axis_code(*_params));
             }
 
             const int n_relocated = relocate_gs();

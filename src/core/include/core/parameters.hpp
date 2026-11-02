@@ -314,6 +314,25 @@ namespace lfs::core {
             // before the usual mean (the normalization stays the mask's pixel count), and so is the densification
             // error map. A missing map means weight 1. Empty = off.
             std::string loss_weight_dir;
+            // Dynamic rolling shutter (standard rasterizer, --native-fisheye only; training/rolling_shutter_motion.hpp):
+            // rolling_shutter = a file of per-image motion within the readout (name, angular velocity, angular
+            // acceleration, linear velocity, linear acceleration in the mid-readout camera axes; abq/rs_motion.py), read
+            // top row first in rs_readout_ms; every splat is drawn through the pose of the time its row was read (the
+            // training images stay the raw, uncorrected frames). rs_learn (comma list of omega, alpha, vel, acc,
+            // readout) refines those from rs_learn_start on: per-camera corrections in pixels at the readout ends (Adam,
+            // rs_lr per camera update, prior rs_prior |c|^2, smoothness rs_smooth |c - c_neighbour|^2) and the readout
+            // (Adam, rs_readout_lr ms per step); written to <output>/rs_motion_learned.txt. Empty = off.
+            std::string rolling_shutter;
+            float rs_readout_ms = 10.0f;
+            std::string rs_learn;
+            float rs_lr = 0.05f;
+            float rs_readout_lr = 0.002f;
+            float rs_prior = 1e-4f;
+            float rs_smooth = 0.0f;
+            size_t rs_learn_start = 3'000;
+            // > rs_learn_start with both the readout and motion learned: the readout until then, the motion after (0 = both
+            // from rs_learn_start; they trade off: a longer readout with slower motion draws the same frame)
+            size_t rs_motion_start = 0;
             float scale_reg = 0.01f;
             float scale_reg_decay_power = -1.0f;
             float erank_reg = 0.0f;
@@ -451,12 +470,8 @@ namespace lfs::core {
             // the behaviour before 2026-11-02; the hinge then pushes all three log-scales); "area" = the
             // area-equivalent radius of its two longest axes, sqrt(s1 s2), so a long thin splat (strap, rope, gate
             // bar) seen up close no longer counts as big, and only those two axes are pushed, never the shortest.
-            // "weighted" = measured as "area", but every axis i is pushed by (s_i / s_max)^screen_share_falloff of the
-            // step: the longest fully, a round splat on all three (as "max"), a strap's width (1/30 of its length)
-            // 3% at falloff 1 and its thickness nearly nothing; falloff 0 = all three equally, large = longest only.
             // Standard rasterizer only (GUT measures a projected box area and keeps "max").
             std::string screen_share_axis = "max";
-            float screen_share_falloff = 1.0f; // K >= 0 of screen_share_axis "weighted"
             bool use_edge_map = true;
 
             // Random initialization parameters

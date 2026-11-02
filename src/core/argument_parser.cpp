@@ -77,6 +77,15 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--generated-pixel-weight", "generated_pixel_weight", Float},
             OptimizationCliBinding{"--generated-loss-weight", "generated_loss_weight", Float},
             OptimizationCliBinding{"--loss-weight-dir", "loss_weight_dir", String},
+            OptimizationCliBinding{"--rolling-shutter", "rolling_shutter", String},
+            OptimizationCliBinding{"--rs-readout-ms", "rs_readout_ms", Float},
+            OptimizationCliBinding{"--rs-learn", "rs_learn", String, false, "; values: comma list of omega, alpha, vel, acc, readout"},
+            OptimizationCliBinding{"--rs-lr", "rs_lr", Float},
+            OptimizationCliBinding{"--rs-readout-lr", "rs_readout_lr", Float},
+            OptimizationCliBinding{"--rs-prior", "rs_prior", Float},
+            OptimizationCliBinding{"--rs-smooth", "rs_smooth", Float},
+            OptimizationCliBinding{"--rs-learn-start", "rs_learn_start", Integer},
+            OptimizationCliBinding{"--rs-motion-start", "rs_motion_start", Integer},
             OptimizationCliBinding{"--growth-visit-normalize", "growth_visit_normalize", Bool},
             OptimizationCliBinding{"--growth-visit-stat", "growth_visit_stat", String, false, "; values: mean, weighted"},
             OptimizationCliBinding{"--opacity-decay-rendered-only", "opacity_decay_rendered_only", Bool},
@@ -87,8 +96,7 @@ namespace lfs::core::args {
                                    "; values: ssim, ssim_cs"},
             OptimizationCliBinding{"--max-screen-share", "max_screen_share", Float},
             OptimizationCliBinding{"--screen-share-penalty", "screen_share_penalty", Float},
-            OptimizationCliBinding{"--screen-share-axis", "screen_share_axis", String, false, "; values: max, area, weighted"},
-            OptimizationCliBinding{"--screen-share-falloff", "screen_share_falloff", Float},
+            OptimizationCliBinding{"--screen-share-axis", "screen_share_axis", String, false, "; values: max, area"},
             OptimizationCliBinding{"--no-edge-map", "use_edge_map", Bool, true},
             OptimizationCliBinding{"--bg-mode", "bg_mode", Enum, false,
                                    "; values: solidcolor, modulation, image, random", "solid_color", "solidcolor"},
@@ -846,6 +854,15 @@ namespace {
             ::args::ValueFlag<float> generated_pixel_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--generated-pixel-weight"), {"generated-pixel-weight"});
             ::args::ValueFlag<float> generated_loss_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--generated-loss-weight"), {"generated-loss-weight"});
             ::args::ValueFlag<std::string> loss_weight_dir(training_group, "folder", lfs::core::args::optimization_cli_help("--loss-weight-dir"), {"loss-weight-dir"});
+            ::args::ValueFlag<std::string> rolling_shutter(training_group, "file", lfs::core::args::optimization_cli_help("--rolling-shutter"), {"rolling-shutter"});
+            ::args::ValueFlag<float> rs_readout_ms(training_group, "ms", lfs::core::args::optimization_cli_help("--rs-readout-ms"), {"rs-readout-ms"});
+            ::args::ValueFlag<std::string> rs_learn(training_group, "list", lfs::core::args::optimization_cli_help("--rs-learn"), {"rs-learn"});
+            ::args::ValueFlag<float> rs_lr(training_group, "px", lfs::core::args::optimization_cli_help("--rs-lr"), {"rs-lr"});
+            ::args::ValueFlag<float> rs_readout_lr(training_group, "ms", lfs::core::args::optimization_cli_help("--rs-readout-lr"), {"rs-readout-lr"});
+            ::args::ValueFlag<float> rs_prior(training_group, "weight", lfs::core::args::optimization_cli_help("--rs-prior"), {"rs-prior"});
+            ::args::ValueFlag<float> rs_smooth(training_group, "weight", lfs::core::args::optimization_cli_help("--rs-smooth"), {"rs-smooth"});
+            ::args::ValueFlag<int> rs_learn_start(training_group, "iter", lfs::core::args::optimization_cli_help("--rs-learn-start"), {"rs-learn-start"});
+            ::args::ValueFlag<int> rs_motion_start(training_group, "iter", lfs::core::args::optimization_cli_help("--rs-motion-start"), {"rs-motion-start"});
             ::args::Flag growth_visit_normalize(training_group, "enabled", lfs::core::args::optimization_cli_help("--growth-visit-normalize"), {"growth-visit-normalize"});
             ::args::ValueFlag<std::string> growth_visit_stat(training_group, "stat", lfs::core::args::optimization_cli_help("--growth-visit-stat"), {"growth-visit-stat"});
             ::args::Flag opacity_decay_rendered_only(training_group, "enabled", lfs::core::args::optimization_cli_help("--opacity-decay-rendered-only"), {"opacity-decay-rendered-only"});
@@ -862,7 +879,6 @@ namespace {
             ::args::ValueFlag<float> max_screen_share(training_group, "max_screen_share", lfs::core::args::optimization_cli_help("--max-screen-share"), {"max-screen-share"});
             ::args::ValueFlag<float> screen_share_penalty(training_group, "screen_share_penalty", lfs::core::args::optimization_cli_help("--screen-share-penalty"), {"screen-share-penalty"});
             ::args::ValueFlag<std::string> screen_share_axis(training_group, "axis", lfs::core::args::optimization_cli_help("--screen-share-axis"), {"screen-share-axis"});
-            ::args::ValueFlag<float> screen_share_falloff(training_group, "K", lfs::core::args::optimization_cli_help("--screen-share-falloff"), {"screen-share-falloff"});
             ::args::Flag no_edge_map(training_group, "no_edge_map", lfs::core::args::optimization_cli_help("--no-edge-map"), {"no-edge-map"});
             ::args::ValueFlag<std::string> bg_mode(training_group, "mode", lfs::core::args::optimization_cli_help("--bg-mode"), {"bg-mode"});
             ::args::ValueFlag<std::string> bg_color(training_group, "color", "solidcolor background color as #RRGGBB or (R,G,B) with 0-255 channels (default: #000000)", {"bg-color"});
@@ -1504,18 +1520,27 @@ namespace {
             if (distortion_depth && ::args::get(distortion_depth) != "distance" && ::args::get(distortion_depth) != "z") {
                 return std::unexpected("ERROR: --distortion-depth must be distance or z");
             }
-            if (screen_share_axis && ::args::get(screen_share_axis) != "max" && ::args::get(screen_share_axis) != "area" &&
-                ::args::get(screen_share_axis) != "weighted") {
-                return std::unexpected("ERROR: --screen-share-axis must be max, area or weighted");
-            }
-            if (screen_share_falloff &&
-                (!std::isfinite(::args::get(screen_share_falloff)) || ::args::get(screen_share_falloff) < 0.0f)) {
-                return std::unexpected("ERROR: --screen-share-falloff must be finite and >= 0");
+            if (screen_share_axis && ::args::get(screen_share_axis) != "max" && ::args::get(screen_share_axis) != "area") {
+                return std::unexpected("ERROR: --screen-share-axis must be max or area");
             }
             if (distortion_skip_plane_crossing &&
                 (!std::isfinite(::args::get(distortion_skip_plane_crossing)) ||
                  ::args::get(distortion_skip_plane_crossing) < 0.0f || ::args::get(distortion_skip_plane_crossing) > 10.0f)) {
                 return std::unexpected("ERROR: --distortion-skip-plane-crossing must be within [0, 10] (0 = off)");
+            }
+            if (rs_readout_ms && (!std::isfinite(::args::get(rs_readout_ms)) || ::args::get(rs_readout_ms) < 0.0f ||
+                                  ::args::get(rs_readout_ms) > 100.0f)) {
+                return std::unexpected("ERROR: --rs-readout-ms must be within [0, 100]");
+            }
+            if (rs_learn_start && ::args::get(rs_learn_start) < 0) {
+                return std::unexpected("ERROR: --rs-learn-start must be >= 0");
+            }
+            if (rs_motion_start && ::args::get(rs_motion_start) < 0) {
+                return std::unexpected("ERROR: --rs-motion-start must be >= 0");
+            }
+            for (auto* f : {&rs_lr, &rs_readout_lr, &rs_prior, &rs_smooth}) {
+                if (*f && (!std::isfinite(::args::get(*f)) || ::args::get(*f) < 0.0f))
+                    return std::unexpected("ERROR: --rs-lr, --rs-readout-lr, --rs-prior and --rs-smooth must be finite and >= 0");
             }
             if (distortion_min_dist &&
                 (!std::isfinite(::args::get(distortion_min_dist)) ||
@@ -1641,6 +1666,15 @@ namespace {
                                         generated_pixel_weight_val = cli_option_present({"--generated-pixel-weight"}) ? std::optional<float>(::args::get(generated_pixel_weight)) : std::optional<float>(),
                                         generated_loss_weight_val = cli_option_present({"--generated-loss-weight"}) ? std::optional<float>(::args::get(generated_loss_weight)) : std::optional<float>(),
                                         loss_weight_dir_val = cli_option_present({"--loss-weight-dir"}) ? std::optional<std::string>(::args::get(loss_weight_dir)) : std::optional<std::string>(),
+                                        rolling_shutter_val = cli_option_present({"--rolling-shutter"}) ? std::optional<std::string>(::args::get(rolling_shutter)) : std::optional<std::string>(),
+                                        rs_readout_ms_val = cli_option_present({"--rs-readout-ms"}) ? std::optional<float>(::args::get(rs_readout_ms)) : std::optional<float>(),
+                                        rs_learn_val = cli_option_present({"--rs-learn"}) ? std::optional<std::string>(::args::get(rs_learn)) : std::optional<std::string>(),
+                                        rs_lr_val = cli_option_present({"--rs-lr"}) ? std::optional<float>(::args::get(rs_lr)) : std::optional<float>(),
+                                        rs_readout_lr_val = cli_option_present({"--rs-readout-lr"}) ? std::optional<float>(::args::get(rs_readout_lr)) : std::optional<float>(),
+                                        rs_prior_val = cli_option_present({"--rs-prior"}) ? std::optional<float>(::args::get(rs_prior)) : std::optional<float>(),
+                                        rs_smooth_val = cli_option_present({"--rs-smooth"}) ? std::optional<float>(::args::get(rs_smooth)) : std::optional<float>(),
+                                        rs_learn_start_val = cli_option_present({"--rs-learn-start"}) ? std::optional<int>(::args::get(rs_learn_start)) : std::optional<int>(),
+                                        rs_motion_start_val = cli_option_present({"--rs-motion-start"}) ? std::optional<int>(::args::get(rs_motion_start)) : std::optional<int>(),
                                         growth_visit_normalize_flag = bool(growth_visit_normalize),
                                         growth_visit_stat_val = cli_option_present({"--growth-visit-stat"}) ? std::optional<std::string>(::args::get(growth_visit_stat)) : std::optional<std::string>(),
                                         steps_scaler_val = cli_option_present({"--steps-scaler"}) ? std::optional<float>(::args::get(steps_scaler)) : std::optional<float>(),
@@ -1737,9 +1771,6 @@ namespace {
                                         screen_share_axis_val = cli_option_present({"--screen-share-axis"})
                                                                     ? std::optional<std::string>(::args::get(screen_share_axis))
                                                                     : std::optional<std::string>(),
-                                        screen_share_falloff_val = cli_option_present({"--screen-share-falloff"})
-                                                                       ? std::optional<float>(::args::get(screen_share_falloff))
-                                                                       : std::optional<float>(),
                                         no_edge_map_flag = bool(no_edge_map),
                                         eval_steps_val = std::move(eval_steps_val),
                                         freeze_lr_scale_val = cli_option_present({"--freeze-lr-scale"}) ? std::optional<float>(::args::get(freeze_lr_scale)) : std::optional<float>(),
@@ -1839,6 +1870,20 @@ namespace {
                     opt.loss_weight_dir = loss_weight_dir_val->empty()
                                               ? std::string{}
                                               : lfs::core::path_to_utf8(absolute_input_path(*loss_weight_dir_val));
+                if (rolling_shutter_val)
+                    opt.rolling_shutter = rolling_shutter_val->empty()
+                                              ? std::string{}
+                                              : lfs::core::path_to_utf8(absolute_input_path(*rolling_shutter_val));
+                setVal(rs_readout_ms_val, opt.rs_readout_ms);
+                setVal(rs_learn_val, opt.rs_learn);
+                setVal(rs_lr_val, opt.rs_lr);
+                setVal(rs_readout_lr_val, opt.rs_readout_lr);
+                setVal(rs_prior_val, opt.rs_prior);
+                setVal(rs_smooth_val, opt.rs_smooth);
+                if (rs_learn_start_val)
+                    opt.rs_learn_start = static_cast<size_t>(*rs_learn_start_val);
+                if (rs_motion_start_val)
+                    opt.rs_motion_start = static_cast<size_t>(*rs_motion_start_val);
                 if (growth_visit_normalize_flag)
                     opt.growth_visit_normalize = true;
                 setVal(growth_visit_stat_val, opt.growth_visit_stat);
@@ -1943,7 +1988,6 @@ namespace {
                 setVal(max_screen_share_val, opt.max_screen_share);
                 setVal(screen_share_penalty_val, opt.screen_share_penalty);
                 setVal(screen_share_axis_val, opt.screen_share_axis);
-                setVal(screen_share_falloff_val, opt.screen_share_falloff);
                 if (no_edge_map_flag)
                     opt.use_edge_map = false;
                 if (eval_steps_val && !eval_steps_val->empty()) {
@@ -2020,6 +2064,15 @@ namespace {
                 note_opt("generated_pixel_weight", generated_pixel_weight_val.has_value());
                 note_opt("generated_loss_weight", generated_loss_weight_val.has_value());
                 note_opt("loss_weight_dir", loss_weight_dir_val.has_value());
+                note_opt("rolling_shutter", rolling_shutter_val.has_value());
+                note_opt("rs_readout_ms", rs_readout_ms_val.has_value());
+                note_opt("rs_learn", rs_learn_val.has_value());
+                note_opt("rs_lr", rs_lr_val.has_value());
+                note_opt("rs_readout_lr", rs_readout_lr_val.has_value());
+                note_opt("rs_prior", rs_prior_val.has_value());
+                note_opt("rs_smooth", rs_smooth_val.has_value());
+                note_opt("rs_learn_start", rs_learn_start_val.has_value());
+                note_opt("rs_motion_start", rs_motion_start_val.has_value());
                 note_opt("growth_visit_normalize", growth_visit_normalize_flag);
                 note_opt("growth_visit_stat", growth_visit_stat_val.has_value());
                 note_opt("opacity_decay_rendered_only", opacity_decay_rendered_only_flag || no_opacity_decay_rendered_only_flag);
@@ -2077,7 +2130,6 @@ namespace {
                 note_opt("max_screen_share", max_screen_share_val.has_value());
                 note_opt("screen_share_penalty", screen_share_penalty_val.has_value());
                 note_opt("screen_share_axis", screen_share_axis_val.has_value());
-                note_opt("screen_share_falloff", screen_share_falloff_val.has_value());
                 note_opt("use_edge_map", no_edge_map_flag);
                 note_opt("eval_steps", eval_steps_val && !eval_steps_val->empty());
                 note_opt("mask_mode", mask_mode_val.has_value());

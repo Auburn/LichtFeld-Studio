@@ -74,4 +74,27 @@ namespace lfs::training::losses {
             const Params& params);
     };
 
+    /**
+     * @brief Opacity binarization on sigmoid(opacity_raw) with fused CUDA kernel
+     *
+     * Loss:     L = weight * mean(o * (1 - o)), o = sigmoid(opacity_raw)
+     * Gradient: ∂L/∂opacity_raw = (weight / N) * (1 - 2 o) * o * (1 - o)
+     *
+     * Pushes every opacity toward 0 or 1. Accumulates into opacity_raw_grad in place.
+     */
+    struct OpacityBinarizeRegularization {
+        struct Params {
+            float weight; ///< Regularization weight
+        };
+
+        static std::expected<lfs::core::Tensor, std::string> forward(
+            const lfs::core::Tensor& opacity_raw,
+            lfs::core::Tensor& opacity_raw_grad,
+            const Params& params);
+
+        static std::expected<lfs::core::Tensor, std::string> forward_loss_only(
+            const lfs::core::Tensor& opacity_raw,
+            const Params& params);
+    };
+
 } // namespace lfs::training::losses

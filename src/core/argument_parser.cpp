@@ -31,6 +31,7 @@
 #include <print>
 #include <set>
 #include <string_view>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 #ifdef _WIN32
@@ -57,6 +58,27 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--late-lr-anneal", "late_lr_anneal", Float},
             OptimizationCliBinding{"--gradient-loss-weight", "gradient_loss_weight", Float},
             OptimizationCliBinding{"--densify-structure-weight", "densify_structure_weight", Float},
+            OptimizationCliBinding{"--opacity-decay", "opacity_decay", Float},
+            OptimizationCliBinding{"--scale-decay", "scale_decay", Float},
+            OptimizationCliBinding{"--opacity-binarize-weight", "opacity_binarize_weight", Float},
+            OptimizationCliBinding{"--opacity-binarize-start", "opacity_binarize_start", Integer},
+            OptimizationCliBinding{"--distortion-weight", "distortion_weight", Float},
+            OptimizationCliBinding{"--distortion-start", "distortion_start", Integer},
+            OptimizationCliBinding{"--distortion-near", "distortion_near", Float},
+            OptimizationCliBinding{"--distortion-far", "distortion_far", Float},
+            OptimizationCliBinding{"--distortion-depth", "distortion_depth", String, false, "; values: distance, z"},
+            OptimizationCliBinding{"--distortion-skip-plane-crossing", "distortion_skip_plane_crossing", Float},
+            OptimizationCliBinding{"--distortion-min-dist", "distortion_min_dist", Float},
+            OptimizationCliBinding{"--generated-prefix", "generated_prefix", String},
+            OptimizationCliBinding{"--generated-lowpass-sigma", "generated_lowpass_sigma", Float},
+            OptimizationCliBinding{"--generated-texture-radius", "generated_texture_radius", Integer},
+            OptimizationCliBinding{"--generated-lowpass-weight", "generated_lowpass_weight", Float},
+            OptimizationCliBinding{"--generated-texture-weight", "generated_texture_weight", Float},
+            OptimizationCliBinding{"--generated-pixel-weight", "generated_pixel_weight", Float},
+            OptimizationCliBinding{"--generated-loss-weight", "generated_loss_weight", Float},
+            OptimizationCliBinding{"--loss-weight-dir", "loss_weight_dir", String},
+            OptimizationCliBinding{"--growth-visit-normalize", "growth_visit_normalize", Bool},
+            OptimizationCliBinding{"--growth-visit-stat", "growth_visit_stat", String, false, "; values: mean, weighted"},
             OptimizationCliBinding{"--opacity-decay-rendered-only", "opacity_decay_rendered_only", Bool},
             OptimizationCliBinding{"--no-opacity-decay-rendered-only", "opacity_decay_rendered_only", Bool, true},
             OptimizationCliBinding{"--steps-scaler", "steps_scaler", Float, false, "; cannot be combined with --iter"},
@@ -65,6 +87,8 @@ namespace lfs::core::args {
                                    "; values: ssim, ssim_cs"},
             OptimizationCliBinding{"--max-screen-share", "max_screen_share", Float},
             OptimizationCliBinding{"--screen-share-penalty", "screen_share_penalty", Float},
+            OptimizationCliBinding{"--screen-share-axis", "screen_share_axis", String, false, "; values: max, area, weighted"},
+            OptimizationCliBinding{"--screen-share-falloff", "screen_share_falloff", Float},
             OptimizationCliBinding{"--no-edge-map", "use_edge_map", Bool, true},
             OptimizationCliBinding{"--bg-mode", "bg_mode", Enum, false,
                                    "; values: solidcolor, modulation, image, random", "solid_color", "solidcolor"},
@@ -780,6 +804,7 @@ namespace {
             ::args::ValueFlag<int> render_height(render_path_group, "height", "Output height (default 1080)", {"render-height"});
             ::args::ValueFlag<int> render_fps(render_path_group, "fps", "Output framerate (default 30)", {"render-fps"});
             ::args::ValueFlag<int> render_crf(render_path_group, "crf", "Video quality, lower=better (default 18)", {"render-crf"});
+            ::args::ValueFlag<float> render_fisheye(render_path_group, "hfov", "Render through an equidistant fisheye lens with this horizontal field of view in degrees, centred, square pixels (default: the path's pinhole camera)", {"render-fisheye"});
             ::args::Group render_path_provenance_note(render_path_group, "  Metadata: videos always embed a minimal build stamp; --no-provenance strips identifying metadata");
 
             // =============================================================================
@@ -802,6 +827,27 @@ namespace {
             ::args::ValueFlag<float> late_lr_anneal(training_group, "fraction", lfs::core::args::optimization_cli_help("--late-lr-anneal"), {"late-lr-anneal"});
             ::args::ValueFlag<float> gradient_loss_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--gradient-loss-weight"), {"gradient-loss-weight"});
             ::args::ValueFlag<float> densify_structure_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--densify-structure-weight"), {"densify-structure-weight"});
+            ::args::ValueFlag<float> opacity_decay(training_group, "rate", lfs::core::args::optimization_cli_help("--opacity-decay"), {"opacity-decay"});
+            ::args::ValueFlag<float> scale_decay(training_group, "rate", lfs::core::args::optimization_cli_help("--scale-decay"), {"scale-decay"});
+            ::args::ValueFlag<float> opacity_binarize_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--opacity-binarize-weight"), {"opacity-binarize-weight"});
+            ::args::ValueFlag<int> opacity_binarize_start(training_group, "iter", lfs::core::args::optimization_cli_help("--opacity-binarize-start"), {"opacity-binarize-start"});
+            ::args::ValueFlag<float> distortion_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--distortion-weight"), {"distortion-weight"});
+            ::args::ValueFlag<int> distortion_start(training_group, "iter", lfs::core::args::optimization_cli_help("--distortion-start"), {"distortion-start"});
+            ::args::ValueFlag<float> distortion_near(training_group, "depth", lfs::core::args::optimization_cli_help("--distortion-near"), {"distortion-near"});
+            ::args::ValueFlag<float> distortion_far(training_group, "depth", lfs::core::args::optimization_cli_help("--distortion-far"), {"distortion-far"});
+            ::args::ValueFlag<std::string> distortion_depth(training_group, "depth", lfs::core::args::optimization_cli_help("--distortion-depth"), {"distortion-depth"});
+            ::args::ValueFlag<float> distortion_skip_plane_crossing(training_group, "sigmas", lfs::core::args::optimization_cli_help("--distortion-skip-plane-crossing"), {"distortion-skip-plane-crossing"});
+            ::args::ValueFlag<float> distortion_min_dist(training_group, "units", lfs::core::args::optimization_cli_help("--distortion-min-dist"), {"distortion-min-dist"});
+            ::args::ValueFlag<std::string> generated_prefix(training_group, "prefix", lfs::core::args::optimization_cli_help("--generated-prefix"), {"generated-prefix"});
+            ::args::ValueFlag<float> generated_lowpass_sigma(training_group, "pixels", lfs::core::args::optimization_cli_help("--generated-lowpass-sigma"), {"generated-lowpass-sigma"});
+            ::args::ValueFlag<int> generated_texture_radius(training_group, "pixels", lfs::core::args::optimization_cli_help("--generated-texture-radius"), {"generated-texture-radius"});
+            ::args::ValueFlag<float> generated_lowpass_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--generated-lowpass-weight"), {"generated-lowpass-weight"});
+            ::args::ValueFlag<float> generated_texture_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--generated-texture-weight"), {"generated-texture-weight"});
+            ::args::ValueFlag<float> generated_pixel_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--generated-pixel-weight"), {"generated-pixel-weight"});
+            ::args::ValueFlag<float> generated_loss_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--generated-loss-weight"), {"generated-loss-weight"});
+            ::args::ValueFlag<std::string> loss_weight_dir(training_group, "folder", lfs::core::args::optimization_cli_help("--loss-weight-dir"), {"loss-weight-dir"});
+            ::args::Flag growth_visit_normalize(training_group, "enabled", lfs::core::args::optimization_cli_help("--growth-visit-normalize"), {"growth-visit-normalize"});
+            ::args::ValueFlag<std::string> growth_visit_stat(training_group, "stat", lfs::core::args::optimization_cli_help("--growth-visit-stat"), {"growth-visit-stat"});
             ::args::Flag opacity_decay_rendered_only(training_group, "enabled", lfs::core::args::optimization_cli_help("--opacity-decay-rendered-only"), {"opacity-decay-rendered-only"});
             ::args::Flag no_opacity_decay_rendered_only(training_group, "disabled", lfs::core::args::optimization_cli_help("--no-opacity-decay-rendered-only"), {"no-opacity-decay-rendered-only"});
             ::args::ValueFlag<float> steps_scaler(training_group, "steps_scaler", lfs::core::args::optimization_cli_help("--steps-scaler"), {"steps-scaler"});
@@ -815,6 +861,8 @@ namespace {
                     {"ssim_cs", lfs::core::param::DensifyErrorMap::SsimCs}});
             ::args::ValueFlag<float> max_screen_share(training_group, "max_screen_share", lfs::core::args::optimization_cli_help("--max-screen-share"), {"max-screen-share"});
             ::args::ValueFlag<float> screen_share_penalty(training_group, "screen_share_penalty", lfs::core::args::optimization_cli_help("--screen-share-penalty"), {"screen-share-penalty"});
+            ::args::ValueFlag<std::string> screen_share_axis(training_group, "axis", lfs::core::args::optimization_cli_help("--screen-share-axis"), {"screen-share-axis"});
+            ::args::ValueFlag<float> screen_share_falloff(training_group, "K", lfs::core::args::optimization_cli_help("--screen-share-falloff"), {"screen-share-falloff"});
             ::args::Flag no_edge_map(training_group, "no_edge_map", lfs::core::args::optimization_cli_help("--no-edge-map"), {"no-edge-map"});
             ::args::ValueFlag<std::string> bg_mode(training_group, "mode", lfs::core::args::optimization_cli_help("--bg-mode"), {"bg-mode"});
             ::args::ValueFlag<std::string> bg_color(training_group, "color", "solidcolor background color as #RRGGBB or (R,G,B) with 0-255 channels (default: #000000)", {"bg-color"});
@@ -851,6 +899,7 @@ namespace {
             ::args::Flag no_cpu_cache(dataset_group, "no_cpu_cache", "Disable CPU memory caching (default: enabled)", {"no-cpu-cache"});
             ::args::Flag use_16bit(dataset_group, "use_16bit", "Train with 16-bit color images (HDR); caches losslessly as JPEG 2000 (default: 8-bit)", {"use-16bit"});
             ::args::Flag undistort(dataset_group, "undistort", lfs::core::args::optimization_cli_help("--undistort"), {"undistort"});
+            ::args::Flag native_fisheye(dataset_group, "native_fisheye", "Train OPENCV_FISHEYE cameras natively: the standard rasterizer projects splats through the fisheye lens itself, and images and masks stay in fisheye space (instead of --undistort or --gut)", {"native-fisheye"});
             ::args::MapFlag<std::string, std::string> centralize(dataset_group, "mode",
                                                                  "Centralize dataset origin: off, by_pointcloud, by_cameras (default: off)",
                                                                  {"centralize"},
@@ -1199,6 +1248,11 @@ namespace {
                 if (render_crf) {
                     cfg.crf = ::args::get(render_crf);
                 }
+                if (render_fisheye) {
+                    cfg.fisheye_hfov_deg = ::args::get(render_fisheye);
+                    if (!(cfg.fisheye_hfov_deg > 0.0f && cfg.fisheye_hfov_deg < 360.0f))
+                        return std::unexpected("--render-fisheye must be a horizontal field of view in degrees, in (0, 360)");
+                }
                 cfg.include_provenance = params.include_provenance;
                 params.render_path = cfg;
 
@@ -1441,6 +1495,33 @@ namespace {
                 !lfs::core::param::ppisp_holdout_appearance_from_string(::args::get(ppisp_holdout_appearance)))
                 return std::unexpected("ERROR: --ppisp-holdout-appearance must be mean or nearest");
 
+            if (opacity_binarize_start && ::args::get(opacity_binarize_start) < 0) {
+                return std::unexpected("ERROR: --opacity-binarize-start must be >= 0");
+            }
+            if (distortion_start && ::args::get(distortion_start) < 0) {
+                return std::unexpected("ERROR: --distortion-start must be >= 0");
+            }
+            if (distortion_depth && ::args::get(distortion_depth) != "distance" && ::args::get(distortion_depth) != "z") {
+                return std::unexpected("ERROR: --distortion-depth must be distance or z");
+            }
+            if (screen_share_axis && ::args::get(screen_share_axis) != "max" && ::args::get(screen_share_axis) != "area" &&
+                ::args::get(screen_share_axis) != "weighted") {
+                return std::unexpected("ERROR: --screen-share-axis must be max, area or weighted");
+            }
+            if (screen_share_falloff &&
+                (!std::isfinite(::args::get(screen_share_falloff)) || ::args::get(screen_share_falloff) < 0.0f)) {
+                return std::unexpected("ERROR: --screen-share-falloff must be finite and >= 0");
+            }
+            if (distortion_skip_plane_crossing &&
+                (!std::isfinite(::args::get(distortion_skip_plane_crossing)) ||
+                 ::args::get(distortion_skip_plane_crossing) < 0.0f || ::args::get(distortion_skip_plane_crossing) > 10.0f)) {
+                return std::unexpected("ERROR: --distortion-skip-plane-crossing must be within [0, 10] (0 = off)");
+            }
+            if (distortion_min_dist &&
+                (!std::isfinite(::args::get(distortion_min_dist)) ||
+                 ::args::get(distortion_min_dist) < 0.0f || ::args::get(distortion_min_dist) > 100.0f)) {
+                return std::unexpected("ERROR: --distortion-min-dist must be within [0, 100] scene units (0 = off)");
+            }
             if (morton_reorder_interval) {
                 const int interval = ::args::get(morton_reorder_interval);
                 if (interval < 0) {
@@ -1541,6 +1622,27 @@ namespace {
                                         late_lr_anneal_val = cli_option_present({"--late-lr-anneal"}) ? std::optional<float>(::args::get(late_lr_anneal)) : std::optional<float>(),
                                         gradient_loss_weight_val = cli_option_present({"--gradient-loss-weight"}) ? std::optional<float>(::args::get(gradient_loss_weight)) : std::optional<float>(),
                                         densify_structure_weight_val = cli_option_present({"--densify-structure-weight"}) ? std::optional<float>(::args::get(densify_structure_weight)) : std::optional<float>(),
+                                        opacity_decay_val = cli_option_present({"--opacity-decay"}) ? std::optional<float>(::args::get(opacity_decay)) : std::optional<float>(),
+                                        scale_decay_val = cli_option_present({"--scale-decay"}) ? std::optional<float>(::args::get(scale_decay)) : std::optional<float>(),
+                                        opacity_binarize_weight_val = cli_option_present({"--opacity-binarize-weight"}) ? std::optional<float>(::args::get(opacity_binarize_weight)) : std::optional<float>(),
+                                        opacity_binarize_start_val = cli_option_present({"--opacity-binarize-start"}) ? std::optional<int>(::args::get(opacity_binarize_start)) : std::optional<int>(),
+                                        distortion_weight_val = cli_option_present({"--distortion-weight"}) ? std::optional<float>(::args::get(distortion_weight)) : std::optional<float>(),
+                                        distortion_start_val = cli_option_present({"--distortion-start"}) ? std::optional<int>(::args::get(distortion_start)) : std::optional<int>(),
+                                        distortion_near_val = cli_option_present({"--distortion-near"}) ? std::optional<float>(::args::get(distortion_near)) : std::optional<float>(),
+                                        distortion_far_val = cli_option_present({"--distortion-far"}) ? std::optional<float>(::args::get(distortion_far)) : std::optional<float>(),
+                                        distortion_depth_val = cli_option_present({"--distortion-depth"}) ? std::optional<std::string>(::args::get(distortion_depth)) : std::optional<std::string>(),
+                                        distortion_skip_plane_crossing_val = cli_option_present({"--distortion-skip-plane-crossing"}) ? std::optional<float>(::args::get(distortion_skip_plane_crossing)) : std::optional<float>(),
+                                        distortion_min_dist_val = cli_option_present({"--distortion-min-dist"}) ? std::optional<float>(::args::get(distortion_min_dist)) : std::optional<float>(),
+                                        generated_prefix_val = cli_option_present({"--generated-prefix"}) ? std::optional<std::string>(::args::get(generated_prefix)) : std::optional<std::string>(),
+                                        generated_lowpass_sigma_val = cli_option_present({"--generated-lowpass-sigma"}) ? std::optional<float>(::args::get(generated_lowpass_sigma)) : std::optional<float>(),
+                                        generated_texture_radius_val = cli_option_present({"--generated-texture-radius"}) ? std::optional<int>(::args::get(generated_texture_radius)) : std::optional<int>(),
+                                        generated_lowpass_weight_val = cli_option_present({"--generated-lowpass-weight"}) ? std::optional<float>(::args::get(generated_lowpass_weight)) : std::optional<float>(),
+                                        generated_texture_weight_val = cli_option_present({"--generated-texture-weight"}) ? std::optional<float>(::args::get(generated_texture_weight)) : std::optional<float>(),
+                                        generated_pixel_weight_val = cli_option_present({"--generated-pixel-weight"}) ? std::optional<float>(::args::get(generated_pixel_weight)) : std::optional<float>(),
+                                        generated_loss_weight_val = cli_option_present({"--generated-loss-weight"}) ? std::optional<float>(::args::get(generated_loss_weight)) : std::optional<float>(),
+                                        loss_weight_dir_val = cli_option_present({"--loss-weight-dir"}) ? std::optional<std::string>(::args::get(loss_weight_dir)) : std::optional<std::string>(),
+                                        growth_visit_normalize_flag = bool(growth_visit_normalize),
+                                        growth_visit_stat_val = cli_option_present({"--growth-visit-stat"}) ? std::optional<std::string>(::args::get(growth_visit_stat)) : std::optional<std::string>(),
                                         steps_scaler_val = cli_option_present({"--steps-scaler"}) ? std::optional<float>(::args::get(steps_scaler)) : std::optional<float>(),
                                         sh_degree_interval_val = cli_option_present({"--sh-degree-interval"}) ? std::optional<int>(::args::get(sh_degree_interval)) : std::optional<int>(),
                                         morton_reorder_interval_val = cli_option_present({"--morton-reorder-interval"}) ? std::optional<int>(::args::get(morton_reorder_interval)) : std::optional<int>(),
@@ -1614,6 +1716,7 @@ namespace {
                                         random_flag = bool(random),
                                         gut_flag = bool(gut),
                                         undistort_flag = bool(undistort),
+                                        native_fisheye_flag = bool(native_fisheye),
                                         enable_sparsity_flag = bool(enable_sparsity),
                                         invert_masks_flag = bool(invert_masks),
                                         no_alpha_as_mask_flag = bool(no_alpha_as_mask),
@@ -1630,6 +1733,12 @@ namespace {
                                                                    : std::optional<float>(),
                                         screen_share_penalty_val = cli_option_present({"--screen-share-penalty"})
                                                                        ? std::optional<float>(::args::get(screen_share_penalty))
+                                                                       : std::optional<float>(),
+                                        screen_share_axis_val = cli_option_present({"--screen-share-axis"})
+                                                                    ? std::optional<std::string>(::args::get(screen_share_axis))
+                                                                    : std::optional<std::string>(),
+                                        screen_share_falloff_val = cli_option_present({"--screen-share-falloff"})
+                                                                       ? std::optional<float>(::args::get(screen_share_falloff))
                                                                        : std::optional<float>(),
                                         no_edge_map_flag = bool(no_edge_map),
                                         eval_steps_val = std::move(eval_steps_val),
@@ -1706,6 +1815,33 @@ namespace {
                 setVal(late_lr_anneal_val, opt.late_lr_anneal);
                 setVal(gradient_loss_weight_val, opt.gradient_loss_weight);
                 setVal(densify_structure_weight_val, opt.densify_structure_weight);
+                setVal(opacity_decay_val, opt.opacity_decay);
+                setVal(scale_decay_val, opt.scale_decay);
+                setVal(opacity_binarize_weight_val, opt.opacity_binarize_weight);
+                if (opacity_binarize_start_val)
+                    opt.opacity_binarize_start = static_cast<size_t>(*opacity_binarize_start_val);
+                setVal(distortion_weight_val, opt.distortion_weight);
+                if (distortion_start_val)
+                    opt.distortion_start = static_cast<size_t>(*distortion_start_val);
+                setVal(distortion_near_val, opt.distortion_near);
+                setVal(distortion_far_val, opt.distortion_far);
+                setVal(distortion_depth_val, opt.distortion_depth);
+                setVal(distortion_skip_plane_crossing_val, opt.distortion_skip_plane_crossing);
+                setVal(distortion_min_dist_val, opt.distortion_min_dist);
+                setVal(generated_prefix_val, opt.generated_prefix);
+                setVal(generated_lowpass_sigma_val, opt.generated_lowpass_sigma);
+                setVal(generated_texture_radius_val, opt.generated_texture_radius);
+                setVal(generated_lowpass_weight_val, opt.generated_lowpass_weight);
+                setVal(generated_texture_weight_val, opt.generated_texture_weight);
+                setVal(generated_pixel_weight_val, opt.generated_pixel_weight);
+                setVal(generated_loss_weight_val, opt.generated_loss_weight);
+                if (loss_weight_dir_val)
+                    opt.loss_weight_dir = loss_weight_dir_val->empty()
+                                              ? std::string{}
+                                              : lfs::core::path_to_utf8(absolute_input_path(*loss_weight_dir_val));
+                if (growth_visit_normalize_flag)
+                    opt.growth_visit_normalize = true;
+                setVal(growth_visit_stat_val, opt.growth_visit_stat);
                 if (opacity_decay_rendered_only_flag)
                     opt.opacity_decay_rendered_only = true;
                 if (no_opacity_decay_rendered_only_flag)
@@ -1799,12 +1935,15 @@ namespace {
                 setFlag(random_flag, opt.random);
                 setFlag(gut_flag, opt.gut);
                 setFlag(undistort_flag, opt.undistort);
+                setFlag(native_fisheye_flag, opt.native_fisheye);
                 setFlag(enable_sparsity_flag, opt.enable_sparsity);
                 if (no_error_map_flag)
                     opt.use_error_map = false;
                 setVal(densify_error_map_val, opt.densify_error_map);
                 setVal(max_screen_share_val, opt.max_screen_share);
                 setVal(screen_share_penalty_val, opt.screen_share_penalty);
+                setVal(screen_share_axis_val, opt.screen_share_axis);
+                setVal(screen_share_falloff_val, opt.screen_share_falloff);
                 if (no_edge_map_flag)
                     opt.use_edge_map = false;
                 if (eval_steps_val && !eval_steps_val->empty()) {
@@ -1862,6 +2001,27 @@ namespace {
                 note_opt("late_lr_anneal", late_lr_anneal_val.has_value());
                 note_opt("gradient_loss_weight", gradient_loss_weight_val.has_value());
                 note_opt("densify_structure_weight", densify_structure_weight_val.has_value());
+                note_opt("opacity_decay", opacity_decay_val.has_value());
+                note_opt("scale_decay", scale_decay_val.has_value());
+                note_opt("opacity_binarize_weight", opacity_binarize_weight_val.has_value());
+                note_opt("opacity_binarize_start", opacity_binarize_start_val.has_value());
+                note_opt("distortion_weight", distortion_weight_val.has_value());
+                note_opt("distortion_start", distortion_start_val.has_value());
+                note_opt("distortion_near", distortion_near_val.has_value());
+                note_opt("distortion_far", distortion_far_val.has_value());
+                note_opt("distortion_depth", distortion_depth_val.has_value());
+                note_opt("distortion_skip_plane_crossing", distortion_skip_plane_crossing_val.has_value());
+                note_opt("distortion_min_dist", distortion_min_dist_val.has_value());
+                note_opt("generated_prefix", generated_prefix_val.has_value());
+                note_opt("generated_lowpass_sigma", generated_lowpass_sigma_val.has_value());
+                note_opt("generated_texture_radius", generated_texture_radius_val.has_value());
+                note_opt("generated_lowpass_weight", generated_lowpass_weight_val.has_value());
+                note_opt("generated_texture_weight", generated_texture_weight_val.has_value());
+                note_opt("generated_pixel_weight", generated_pixel_weight_val.has_value());
+                note_opt("generated_loss_weight", generated_loss_weight_val.has_value());
+                note_opt("loss_weight_dir", loss_weight_dir_val.has_value());
+                note_opt("growth_visit_normalize", growth_visit_normalize_flag);
+                note_opt("growth_visit_stat", growth_visit_stat_val.has_value());
                 note_opt("opacity_decay_rendered_only", opacity_decay_rendered_only_flag || no_opacity_decay_rendered_only_flag);
                 note_opt("steps_scaler", steps_scaler_val.has_value());
                 note_opt("sh_degree_interval", sh_degree_interval_val.has_value());
@@ -1910,11 +2070,14 @@ namespace {
                 note_opt("random", random_flag);
                 note_opt("gut", gut_flag);
                 note_opt("undistort", undistort_flag);
+                note_opt("native_fisheye", native_fisheye_flag);
                 note_opt("enable_sparsity", enable_sparsity_flag);
                 note_opt("use_error_map", no_error_map_flag);
                 note_opt("densify_error_map", densify_error_map_val.has_value());
                 note_opt("max_screen_share", max_screen_share_val.has_value());
                 note_opt("screen_share_penalty", screen_share_penalty_val.has_value());
+                note_opt("screen_share_axis", screen_share_axis_val.has_value());
+                note_opt("screen_share_falloff", screen_share_falloff_val.has_value());
                 note_opt("use_edge_map", no_edge_map_flag);
                 note_opt("eval_steps", eval_steps_val && !eval_steps_val->empty());
                 note_opt("mask_mode", mask_mode_val.has_value());
@@ -2088,6 +2251,38 @@ lfs::core::args::parse_args_and_params(int argc, const char* const argv[]) {
         return std::unexpected("ERROR: " + *error);
     if (auto error = validate_cli_nonnegative("--normal-flatten-weight", "normal_flatten_weight",
                                               params->optimization.normal_flatten_weight))
+        return std::unexpected("ERROR: " + *error);
+    if (auto error = validate_cli_nonnegative("--opacity-decay", "opacity_decay",
+                                              params->optimization.opacity_decay))
+        return std::unexpected("ERROR: " + *error);
+    if (auto error = validate_cli_nonnegative("--scale-decay", "scale_decay",
+                                              params->optimization.scale_decay))
+        return std::unexpected("ERROR: " + *error);
+    if (auto error = validate_cli_nonnegative("--opacity-binarize-weight", "opacity_binarize_weight",
+                                              params->optimization.opacity_binarize_weight))
+        return std::unexpected("ERROR: " + *error);
+    for (const auto& [flag, name, value] : {
+             std::tuple{"--generated-lowpass-weight", "generated_lowpass_weight", params->optimization.generated_lowpass_weight},
+             std::tuple{"--generated-texture-weight", "generated_texture_weight", params->optimization.generated_texture_weight},
+             std::tuple{"--generated-pixel-weight", "generated_pixel_weight", params->optimization.generated_pixel_weight},
+             std::tuple{"--generated-loss-weight", "generated_loss_weight", params->optimization.generated_loss_weight},
+         }) {
+        if (auto error = validate_cli_nonnegative(flag, name, value))
+            return std::unexpected("ERROR: " + *error);
+    }
+    if (flag_given("--generated-lowpass-sigma") &&
+        (!std::isfinite(params->optimization.generated_lowpass_sigma) ||
+         params->optimization.generated_lowpass_sigma < 0.0f || params->optimization.generated_lowpass_sigma > 10.0f))
+        return std::unexpected(std::format(
+            "ERROR: generated_lowpass_sigma must be within [0, 10] (got {})",
+            params->optimization.generated_lowpass_sigma));
+    if (flag_given("--generated-texture-radius") &&
+        (params->optimization.generated_texture_radius < 1 || params->optimization.generated_texture_radius > 32))
+        return std::unexpected(std::format(
+            "ERROR: generated_texture_radius must be within [1, 32] (got {})",
+            params->optimization.generated_texture_radius));
+    if (auto error = validate_cli_nonnegative("--distortion-weight", "distortion_weight",
+                                              params->optimization.distortion_weight))
         return std::unexpected("ERROR: " + *error);
     if (flag_given("--max-screen-share") &&
         (!std::isfinite(params->optimization.max_screen_share) ||

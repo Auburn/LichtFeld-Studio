@@ -15,6 +15,8 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/thin_structure.cu
     kernels/blob_seeding.cu
     kernels/gradient_residual.cu
+    kernels/generated_view_loss.cu
+    kernels/loss_weight_map.cu
     kernels/ssim.cu
     kernels/l1_loss.cu
     kernels/ssim_reduction.cu

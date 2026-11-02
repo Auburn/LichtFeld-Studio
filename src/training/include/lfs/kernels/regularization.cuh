@@ -51,4 +51,20 @@ namespace lfs::training::kernels {
         float weight,
         cudaStream_t stream = nullptr);
 
+    /**
+     * @brief Fused opacity binarization: loss = weight * mean(o * (1 - o)), o = sigmoid(opacity_raw)
+     *
+     * Pushes opacities toward 0 or 1. Gradient: (weight / n) * (1 - 2 o) * o * (1 - o).
+     * Same buffers and reductions as launch_fused_opacity_regularization; param_grads may be null
+     * (loss only).
+     */
+    void launch_fused_opacity_binarize(
+        const float* params,
+        float* param_grads,
+        float* loss_out,
+        float* temp_buffer,
+        size_t n,
+        float weight,
+        cudaStream_t stream = nullptr);
+
 } // namespace lfs::training::kernels

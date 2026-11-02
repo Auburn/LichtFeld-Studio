@@ -99,6 +99,8 @@ namespace lfs::training {
         int screen_share_n = 0;
         float screen_share_limit = 0.0f;
         float screen_share_penalty = 0.0f;
+        int screen_share_axis = 0; // lfs::training::kScreenShareAxisMax / kScreenShareAxisArea / kScreenShareAxisWeighted
+        float screen_share_falloff = 1.0f;
     };
 
     struct FastGSFusedAdamState {
@@ -140,7 +142,11 @@ namespace lfs::training {
         void set_per_splat_mean_step(bool enabled, float median_extent);
         // Retain the allocation for both explicit and fused Adam; CPU inputs are uploaded.
         void set_mean_step_far_mask(lfs::core::Tensor mask);
-        void set_screen_share_cap(const float* max_share, int n, float limit, float penalty);
+        // axis: lfs::training::kScreenShareAxisMax (hinge pushes all three log-scales), kScreenShareAxisArea
+        // (only the two longest, the axes in the area radius the forward pass measured) or kScreenShareAxisWeighted
+        // (all three, axis i by (s_i / s_max)^falloff).
+        void set_screen_share_cap(const float* max_share, int n, float limit, float penalty, int axis = 0,
+                                  float falloff = 1.0f);
         void refresh_screen_share_buffer();
         // Collection is independent of the hinge: refinement can still consume
         // projected sizes while the strategy defers scale shrinkage.
@@ -244,6 +250,8 @@ namespace lfs::training {
         int screen_share_n_ = 0;
         float screen_share_limit_ = 0.0f;
         float screen_share_penalty_ = 0.0f;
+        int screen_share_axis_ = 0;
+        float screen_share_falloff_ = 1.0f;
         bool collect_projected_screen_share_ = false;
         int64_t fused_step_iteration_ = -1;
         bool last_step_zeroed_gradients_ = false;

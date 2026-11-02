@@ -34,8 +34,11 @@ namespace lfs::training {
         // Detection runs on block averages of images above this pixel count: its buffers scale with it.
         static constexpr size_t DEFAULT_MAX_DETECTION_PIXELS = 3'000'000;
 
+        // native_fisheye: also capture OPENCV_FISHEYE views that are trained through their lens
+        // (--native-fisheye), triangulating along their fisheye rays.
         explicit BlobSeeder(lfs::core::Tensor reference_points,
-                            size_t max_detection_pixels = DEFAULT_MAX_DETECTION_PIXELS);
+                            size_t max_detection_pixels = DEFAULT_MAX_DETECTION_PIXELS,
+                            bool native_fisheye = false);
 
         void capture(const lfs::core::Camera& camera, const lfs::core::Tensor& image);
         [[nodiscard]] size_t captured_views() const { return _views.size(); }
@@ -55,6 +58,7 @@ namespace lfs::training {
         std::unordered_set<int> _captured_uids;
         size_t _captured_bytes = 0;
         size_t _max_detection_pixels;
+        bool _native_fisheye = false;
         kernels::blob_seeding::DetectionWorkspace _workspace;
     };
 

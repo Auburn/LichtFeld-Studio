@@ -170,6 +170,32 @@ namespace lfs::training::mrnf_strategy {
         size_t N,
         void* stream = nullptr);
 
+    // --growth-visit-normalize: as above, and also, wherever row 1 is positive (the splat received densification
+    // signal this step), adds it to refine_weight_sum, its square to refine_weight_sq and counts a visit.
+    void launch_fold_densification_error_visits_and_zero(
+        float* refine_weight_max,
+        float* refine_weight_sum,
+        float* refine_weight_sq,
+        float* refine_visits,
+        float* densification_info,
+        size_t N,
+        void* stream = nullptr);
+
+    // out[i] = sum[i] / visits[i] where visits[i] > 0, else 0 (out may alias sum).
+    void launch_mean_per_visit(
+        const float* sum,
+        const float* visits,
+        float* out,
+        size_t N,
+        void* stream = nullptr);
+
+    // visits[i] += 1 where values[i] > 0.
+    void launch_count_positive(
+        const float* values,
+        float* visits,
+        size_t N,
+        void* stream = nullptr);
+
     void launch_far_field_mask(
         const float* means,
         float centroid_x,

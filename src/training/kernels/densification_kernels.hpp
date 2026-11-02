@@ -150,6 +150,9 @@ namespace lfs::training::kernels {
 
     /// Subtract min(log(share/limit), log(1.5)) from the longest log-scale axis
     /// when share > limit. The other two axes are left unchanged.
+    /// axis_mode lfs::training::kScreenShareAxisArea (the share measured the area radius of the two longest
+    /// axes): subtract it from both of the two longest axes instead; the shortest is left unchanged.
+    /// kScreenShareAxisWeighted: subtract delta * (s_i / s_max)^falloff from every axis i.
     void launch_clip_log_scale_by_screen_share(
         float* log_scales, // [N, 3]
         const float* max_share,
@@ -157,6 +160,8 @@ namespace lfs::training::kernels {
         size_t frozen_n,
         float limit,
         size_t n,
-        cudaStream_t stream = nullptr);
+        cudaStream_t stream = nullptr,
+        int axis_mode = 0,
+        float falloff = 1.0f);
 
 } // namespace lfs::training::kernels

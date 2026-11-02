@@ -55,12 +55,22 @@ namespace lfs::training {
             float u, v, z;
         };
 
+        [[nodiscard]] bool is_native_fisheye(const lfs::core::Camera& camera) {
+            return !camera.is_undistort_prepared() &&
+                   camera.camera_model_type() == lfs::core::CameraModelType::FISHEYE &&
+                   camera.tangential_distortion().numel() == 0;
+        }
+
         [[nodiscard]] Projection project(const bs::SweepView& view, const float* p) {
             const float* R = view.R;
             const float X = R[0] * p[0] + R[1] * p[1] + R[2] * p[2] + view.t[0];
             const float Y = R[3] * p[0] + R[4] * p[1] + R[5] * p[2] + view.t[1];
             const float Z = R[6] * p[0] + R[7] * p[1] + R[8] * p[2] + view.t[2];
-            return {view.fx * X / Z + view.cx, view.fy * Y / Z + view.cy, Z};
+            if (!(Z > 0.0f))
+                return {-1.0f, -1.0f, Z};
+            float u, v;
+            bs::sweep_project(view, X, Y, Z, u, v);
+            return {u, v, Z};
         }
 
         [[nodiscard]] float percentile(std::vector<float>& values, const float q) {
@@ -70,9 +80,10 @@ namespace lfs::training {
         }
     } // namespace
 
-    BlobSeeder::BlobSeeder(Tensor reference_points, const size_t max_detection_pixels)
+    BlobSeeder::BlobSeeder(Tensor reference_points, const size_t max_detection_pixels, const bool native_fisheye)
         : _reference_points(reference_points.cpu().contiguous()),
-          _max_detection_pixels(max_detection_pixels) {
+          _max_detection_pixels(max_detection_pixels),
+          _native_fisheye(native_fisheye) {
         assert(_reference_points.ndim() == 2 && _reference_points.shape()[1] == 3);
         assert(_reference_points.dtype() == DataType::Float32);
     }
@@ -82,7 +93,8 @@ namespace lfs::training {
     }
 
     void BlobSeeder::capture(const lfs::core::Camera& camera, const Tensor& image) {
-        if (budget_exhausted() || _captured_uids.contains(camera.uid()) || !has_pinhole_image(camera))
+        const bool fisheye = _native_fisheye && is_native_fisheye(camera);
+        if (budget_exhausted() || _captured_uids.contains(camera.uid()) || !(has_pinhole_image(camera) || fisheye))
             return;
         if (!image.is_valid() || image.device() != Device::CUDA || image.ndim() != 3 || image.shape()[0] < 3 ||
             (image.dtype() != DataType::UInt8 && image.dtype() != DataType::Float32))
@@ -111,6 +123,12 @@ namespace lfs::training {
         view.geometry.cy = cy * inverse_factor;
         view.geometry.width = width;
         view.geometry.height = height;
+        if (fisheye) {
+            view.geometry.fisheye = 1;
+            const auto radial = camera.radial_distortion().cpu().contiguous();
+            for (size_t i = 0; i < std::min<size_t>(4, radial.numel()); ++i)
+                view.geometry.k[i] = radial.ptr<float>()[i];
+        }
         view.peaks = bs::detect_peaks(rgb, static_cast<int>(_views.size()), _workspace);
         view.geometry.density[0] = view.peaks.density[0];
         view.geometry.density[1] = view.peaks.density[1];
@@ -236,13 +254,17 @@ namespace lfs::training {
             const float* row = peak_rows + p * bs::PeakFieldCount;
             const auto& g = geometry[static_cast<size_t>(row[bs::PeakView])];
             const float z = s[bs::SweepDepth];
-            const float dx = (row[bs::PeakX] + 0.5f - g.cx) / g.fx * z;
-            const float dy = (row[bs::PeakY] + 0.5f - g.cy) / g.fy * z;
+            float rx, ry;
+            if (!bs::sweep_unproject(g, (row[bs::PeakX] + 0.5f - g.cx) / g.fx, (row[bs::PeakY] + 0.5f - g.cy) / g.fy, rx, ry))
+                continue;
+            const float dx = rx * z;
+            const float dy = ry * z;
             const float c[3] = {dx - g.t[0], dy - g.t[1], z - g.t[2]};
             Detection d{};
             for (int a = 0; a < 3; ++a)
                 d.position[a] = g.R[a] * c[0] + g.R[3 + a] * c[1] + g.R[6 + a] * c[2];
-            d.depth = z;
+            // pixel footprints: a fisheye pixel spans about 1/f radians wherever it is, so scale by the distance
+            d.depth = g.fisheye ? std::sqrt(dx * dx + dy * dy + z * z) : z;
             d.fx = g.fx;
             d.peak = p;
             detections.push_back(d);

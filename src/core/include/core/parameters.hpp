@@ -270,6 +270,50 @@ namespace lfs::core {
             size_t morton_reorder_interval = 5'000;
             int sh_degree = 3;
             float opacity_reg = 0.01f;
+            // weight * mean over all splats of o (1 - o), o = sigmoid(raw opacity), active from
+            // opacity_binarize_start on: pushes opacities toward 0 or 1. 0 = off.
+            float opacity_binarize_weight = 0.0f;
+            size_t opacity_binarize_start = 15'000;
+            // Depth distortion (2DGS / Mip-NeRF 360) in the standard rasterizer: weight * mean over pixels
+            // of sum_{i>j} w_i w_j (m_i - m_j)^2, w the blending weights and m the splat depth d mapped by
+            // far/(far - near) * (1 - near/d), d clamped to [near, far]. Active from distortion_start on.
+            // 0 = off. Not available with GUT.
+            float distortion_weight = 0.0f;
+            size_t distortion_start = 0;
+            float distortion_near = 0.2f;
+            float distortion_far = 1000.0f;
+            // Depth d of the distortion term (its own per-splat value; sorting and depth output are unchanged):
+            // "distance" = distance from the camera centre (default); "z" = the rasterizer's sort depth, i.e.
+            // camera z on the pinhole path (the behaviour before 2026-11-01, kept for comparison: splats beside
+            // the camera get m ~ 0 whatever their distance, which rewards opaque near-plane blobs). The
+            // --native-fisheye path uses the distance either way.
+            std::string distortion_depth = "distance";
+            // Leave out of the distortion term, per view, every splat whose k-sigma extent along the camera axis
+            // crosses the camera plane (z - k sigma_z < 0); k = this value, 0 = none left out.
+            float distortion_skip_plane_crossing = 2.0f;
+            // Leave out of the distortion term, per view, every splat whose distortion depth d is below this
+            // (units of the scene; 0 = off, the default). The near = 0.2 mapping is so steep below ~1 unit that
+            // the edges of a very close object (a trunk passed at arm's length) dominate the term, which then
+            // widens the object's blurry fringe into an opaque wall; such splats still occlude.
+            float distortion_min_dist = 0.0f;
+            // Generated training views (e.g. diffusion-made novel views): images whose file name starts with
+            // generated_prefix replace L1 + SSIM by an alignment-tolerant loss, generated_loss_weight *
+            // (lowpass_weight * L1 of the Gaussian-blurred (sigma generated_lowpass_sigma) images + texture_weight *
+            // mean |local std of render luma - of target luma| over (2 radius + 1)^2 windows + pixel_weight * L1),
+            // masked like the photometric loss (training/kernels/generated_view_loss.hpp). Empty prefix = off.
+            std::string generated_prefix;
+            float generated_lowpass_sigma = 2.0f;
+            int generated_texture_radius = 3;
+            float generated_lowpass_weight = 1.0f;
+            float generated_texture_weight = 1.0f;
+            float generated_pixel_weight = 0.0f;
+            float generated_loss_weight = 1.0f;
+            // Per-pixel photometric loss weights: <loss_weight_dir>/<image name>.png per training image (16-bit
+            // grayscale PNG, weight = value / 10000; or a float EXR / TIFF holding the weight itself), any resolution,
+            // resampled bilinearly to the training resolution. The per-pixel L1 and D-SSIM terms are multiplied by it
+            // before the usual mean (the normalization stays the mask's pixel count), and so is the densification
+            // error map. A missing map means weight 1. Empty = off.
+            std::string loss_weight_dir;
             float scale_reg = 0.01f;
             float scale_reg_decay_power = -1.0f;
             float erank_reg = 0.0f;
@@ -372,6 +416,9 @@ namespace lfs::core {
             size_t reset_every = 3'000;
             bool gut = false;
             bool undistort = false;
+            // Train fisheye (OPENCV_FISHEYE) cameras through the standard rasterizer's own fisheye
+            // projection, with images and masks left in fisheye space (no --undistort, no --gut).
+            bool native_fisheye = false;
             float steps_scaler = 1.f;       // Scales training step counts; values <= 0 disable scaling
             float image_count_scaler = 1.f; // Share of steps_scaler applied by the GUI image-count auto-scale
 
@@ -382,6 +429,15 @@ namespace lfs::core {
             // At the cap, frees the splats whose removal changes the image least so error-guided
             // growth keeps working until grow_until_iter.
             bool growth_exchange = false;
+            // MRNF growth score per splat = mean per visit (steps in the refine window in which the splat received
+            // densification signal) of the error-weighted blending signal, instead of its maximum over the window;
+            // the edge guidance is likewise averaged over the splat's own visits instead of over all views. A splat
+            // seen in few steps then competes on its per-visit signal alone. Off = the original max rule.
+            bool growth_visit_normalize = false;
+            // Statistic of growth_visit_normalize: "mean" = sum of the per-visit signals / visits; "weighted" = sum of
+            // their squares / their sum (the mean weighted by the signal itself: also independent of the number of
+            // visits, but led by the strongest, i.e. closest, views instead of diluted by many distant ones).
+            std::string growth_visit_stat = "mean";
             float opacity_decay = 0.004f;
             float scale_decay = 0.002f;
             float means_noise_weight = 50.0f;
@@ -391,6 +447,16 @@ namespace lfs::core {
             // Dimensionless on-screen share cap. <=0 or >=1 disables the cap.
             float max_screen_share = 0.3f;
             float screen_share_penalty = 1.0f;
+            // Radius of a splat the cap measures (lfs/training/screen_share.cuh): "max" = its longest axis (default,
+            // the behaviour before 2026-11-02; the hinge then pushes all three log-scales); "area" = the
+            // area-equivalent radius of its two longest axes, sqrt(s1 s2), so a long thin splat (strap, rope, gate
+            // bar) seen up close no longer counts as big, and only those two axes are pushed, never the shortest.
+            // "weighted" = measured as "area", but every axis i is pushed by (s_i / s_max)^screen_share_falloff of the
+            // step: the longest fully, a round splat on all three (as "max"), a strap's width (1/30 of its length)
+            // 3% at falloff 1 and its thickness nearly nothing; falloff 0 = all three equally, large = longest only.
+            // Standard rasterizer only (GUT measures a projected box area and keeps "max").
+            std::string screen_share_axis = "max";
+            float screen_share_falloff = 1.0f; // K >= 0 of screen_share_axis "weighted"
             bool use_edge_map = true;
 
             // Random initialization parameters
@@ -536,6 +602,7 @@ namespace lfs::core {
             int height = 1080;
             int fps = 30;
             int crf = 18;
+            float fisheye_hfov_deg = 0.0f; // > 0: render through an equidistant fisheye with this HFOV
             bool include_provenance = true; // always written to the format's metadata slot; caller chooses full vs minimal, writers fall back to minimal
         };
 

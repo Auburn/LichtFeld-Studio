@@ -78,7 +78,9 @@ void fast_lfs::rasterization::backward(
     float* edge_score_out,
     float* impact_sum_out,
     float* impact_peak_out,
-    cudaStream_t stream) {
+    cudaStream_t stream,
+    const FastGSLens& lens,
+    const FastGSDistortion& distortion) {
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const uint64_t n_tiles_u64 = static_cast<uint64_t>(grid.x) * static_cast<uint64_t>(grid.y);
     const int n_tiles = checked_to_int(n_tiles_u64, "n_tiles exceeds int range");
@@ -102,9 +104,9 @@ void fast_lfs::rasterization::backward(
         // Modes 1/2 are test-only (set_warp_cull_mode_for_testing); WarpCullBwd drives
         // DensificationType::None and no normal channel, so those two stay off the
         // production nest.
-        auto launch_blend_backward_typed =
-            [&]<DensificationType DENS_TYPE, bool NORMAL_CHANNEL, bool IMPACT_SCORE, int WARP_CULL_MODE>() {
-                kernels::backward::blend_backward_cu<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, WARP_CULL_MODE>
+        auto launch_blend_backward_variant =
+            [&]<DensificationType DENS_TYPE, bool NORMAL_CHANNEL, bool IMPACT_SCORE, int WARP_CULL_MODE, bool DISTORTION>() {
+                kernels::backward::blend_backward_cu<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, WARP_CULL_MODE, DISTORTION>
                     <<<n_tiles, config::block_size_blend_backward, 0, stream>>>(
                         per_tile_buffers.instance_ranges,
                         sorted_primitive_indices,
@@ -141,8 +143,20 @@ void fast_lfs::rasterization::backward(
                         width,
                         height,
                         grid.x,
-                        blend_batch_override);
+                        blend_batch_override,
+                        distortion);
                 LFS_CUDA_LAUNCH_CHECK(stream, "fastgs.backward.blend_backward");
+            };
+        // The distortion variant only when the forward bound its buffers; otherwise the unchanged kernels.
+        auto launch_blend_backward_typed =
+            [&]<DensificationType DENS_TYPE, bool NORMAL_CHANNEL, bool IMPACT_SCORE, int WARP_CULL_MODE>() {
+                if constexpr (WARP_CULL_MODE == 0) {
+                    if (distortion.moments != nullptr) {
+                        launch_blend_backward_variant.template operator()<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, 0, true>();
+                        return;
+                    }
+                }
+                launch_blend_backward_variant.template operator()<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, WARP_CULL_MODE, false>();
             };
         auto launch_production = [&]<DensificationType DENS_TYPE>() {
             const bool impact_score = impact_sum_out != nullptr;
@@ -187,8 +201,8 @@ void fast_lfs::rasterization::backward(
     float clip_left, clip_right, clip_top, clip_bottom;
     ewa_clip_bounds(w_f, h_f, fx, fy, cx, cy, clip_left, clip_right, clip_top, clip_bottom);
     if (n_primitives > 0) {
-        auto launch_preprocess_backward = [&]<bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES>() {
-            kernels::backward::preprocess_backward_cu<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES><<<div_round_up(n_primitives, config::block_size_preprocess_backward), config::block_size_preprocess_backward, 0, stream>>>(
+        auto launch_preprocess_backward_lens = [&]<bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES, bool FISHEYE>() {
+            kernels::backward::preprocess_backward_cu<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, FISHEYE><<<div_round_up(n_primitives, config::block_size_preprocess_backward), config::block_size_preprocess_backward, 0, stream>>>(
                 means,
                 scales_raw,
                 rotations_raw,
@@ -221,8 +235,17 @@ void fast_lfs::rasterization::backward(
                 fused_adam,
                 shN_value_bounds,
                 shN_value_n_cells,
-                shN_value_bits);
+                shN_value_bits,
+                lens,
+                distortion.moments != nullptr ? distortion.grad_depths : nullptr,
+                distortion.depth_mode);
             LFS_CUDA_LAUNCH_CHECK(stream, "fastgs.backward.preprocess_backward");
+        };
+        auto launch_preprocess_backward = [&]<bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES>() {
+            if (lens.model == kLensFisheye)
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true>();
+            else
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, false>();
         };
         const bool disabled_features = fused_adam.erank_reg_weight <= 0.0f &&
                                        fused_adam.dc_reg_weight <= 0.0f &&

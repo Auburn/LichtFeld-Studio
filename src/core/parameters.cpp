@@ -457,6 +457,8 @@ namespace lfs::core {
                 }
                 if (json.contains("enable_save_eval_images"))
                     params.enable_save_eval_images = json.at("enable_save_eval_images");
+                if (json.contains("native_fisheye") && json.at("native_fisheye").is_boolean())
+                    params.native_fisheye = json.at("native_fisheye");
                 if (json.contains("ppisp_sidecar_path")) {
                     params.ppisp_sidecar_path =
                         utf8_to_path(json.at("ppisp_sidecar_path").get<std::string>());
@@ -569,6 +571,8 @@ namespace lfs::core {
             morton_reorder_interval = apply(morton_reorder_interval);
             sh_degree_interval = apply_interval(sh_degree_interval);
             grow_until_iter = apply(grow_until_iter);
+            opacity_binarize_start = apply(opacity_binarize_start);
+            distortion_start = apply(distortion_start);
 
             for (auto* steps : {&eval_steps, &save_steps}) {
                 std::set<size_t> unique;
@@ -816,6 +820,7 @@ namespace lfs::core {
             opt_json["eval_steps"] = eval_steps;
             opt_json["save_steps"] = save_steps;
             opt_json["enable_save_eval_images"] = enable_save_eval_images;
+            opt_json["native_fisheye"] = native_fisheye;
             opt_json["ppisp_sidecar_path"] = path_to_utf8(ppisp_sidecar_path);
             opt_json["bg_color"] = {bg_color[0], bg_color[1], bg_color[2]};
             if (!bg_image_path.empty())
@@ -887,6 +892,32 @@ namespace lfs::core {
             if (start_refine > MAX_ITERATION_VALUE || stop_refine > MAX_ITERATION_VALUE ||
                 grow_until_iter > MAX_ITERATION_VALUE)
                 return "refinement iteration fields must fit in a signed int";
+            if (opacity_binarize_start > MAX_ITERATION_VALUE)
+                return std::format("opacity_binarize_start must be within [0, {}] (got {})", MAX_ITERATION_VALUE, opacity_binarize_start);
+            if (distortion_start > MAX_ITERATION_VALUE)
+                return std::format("distortion_start must be within [0, {}] (got {})", MAX_ITERATION_VALUE, distortion_start);
+            if (!std::isfinite(distortion_near) || distortion_near <= 0.0f)
+                return std::format("distortion_near must be finite and positive (got {})", distortion_near);
+            if (!std::isfinite(distortion_far) || distortion_far <= distortion_near)
+                return std::format("distortion_far must be finite and greater than distortion_near (got {} <= {})",
+                                   distortion_far, distortion_near);
+            if (distortion_depth != "distance" && distortion_depth != "z")
+                return std::format("distortion_depth must be 'distance' or 'z' (got '{}')", distortion_depth);
+            if (!std::isfinite(distortion_skip_plane_crossing) || distortion_skip_plane_crossing < 0.0f ||
+                distortion_skip_plane_crossing > 10.0f)
+                return std::format("distortion_skip_plane_crossing must be within [0, 10] (got {})",
+                                   distortion_skip_plane_crossing);
+            if (!std::isfinite(distortion_min_dist) || distortion_min_dist < 0.0f || distortion_min_dist > 100.0f ||
+                (distortion_min_dist > 0.0f && distortion_min_dist >= distortion_far))
+                return std::format("distortion_min_dist must be within [0, 100] and below distortion_far (got {}, far {})",
+                                   distortion_min_dist, distortion_far);
+            // Ranges match kernels::GENERATED_VIEW_MAX_SIGMA / GENERATED_VIEW_MAX_RADIUS (training/kernels/generated_view_loss.hpp).
+            if (!std::isfinite(generated_lowpass_sigma) || generated_lowpass_sigma < 0.0f || generated_lowpass_sigma > 10.0f)
+                return std::format("generated_lowpass_sigma must be within [0, 10] (got {})", generated_lowpass_sigma);
+            if (generated_texture_radius < 1 || generated_texture_radius > 32)
+                return std::format("generated_texture_radius must be within [1, 32] (got {})", generated_texture_radius);
+            if (growth_visit_stat != "mean" && growth_visit_stat != "weighted")
+                return std::format("growth_visit_stat must be 'mean' or 'weighted' (got '{}')", growth_visit_stat);
             if (max_cap < 0)
                 return std::format("max_cap must be nonnegative (got {})", max_cap);
             if (sh_degree < 0 || sh_degree > 3)
@@ -944,6 +975,10 @@ namespace lfs::core {
                 return std::format("steps_scaler must be finite (got {})", steps_scaler);
             if (!std::isfinite(max_screen_share))
                 return std::format("max_screen_share must be finite (got {})", max_screen_share);
+            if (screen_share_axis != "max" && screen_share_axis != "area" && screen_share_axis != "weighted")
+                return std::format("screen_share_axis must be 'max', 'area' or 'weighted' (got '{}')", screen_share_axis);
+            if (!std::isfinite(screen_share_falloff) || screen_share_falloff < 0.0f)
+                return std::format("screen_share_falloff must be finite and >= 0 (got {})", screen_share_falloff);
             if (ppisp_holdout_appearance != PPISPHoldoutAppearance::Mean && ppisp_holdout_appearance != PPISPHoldoutAppearance::Nearest)
                 return "ppisp_holdout_appearance must be mean or nearest";
             if (!std::isfinite(densify_structure_weight) || densify_structure_weight < 0.0f || densify_structure_weight > 4.0f)
@@ -972,6 +1007,12 @@ namespace lfs::core {
                 std::pair{"scaling_lr_end", scaling_lr_end},
                 std::pair{"rotation_lr", rotation_lr},
                 std::pair{"opacity_reg", opacity_reg},
+                std::pair{"opacity_binarize_weight", opacity_binarize_weight},
+                std::pair{"distortion_weight", distortion_weight},
+                std::pair{"generated_lowpass_weight", generated_lowpass_weight},
+                std::pair{"generated_texture_weight", generated_texture_weight},
+                std::pair{"generated_pixel_weight", generated_pixel_weight},
+                std::pair{"generated_loss_weight", generated_loss_weight},
                 std::pair{"scale_reg", scale_reg},
                 std::pair{"erank_reg", erank_reg},
                 std::pair{"dc_reg", dc_reg},

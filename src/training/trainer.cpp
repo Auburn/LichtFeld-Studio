@@ -71,6 +71,7 @@
 #include "training/kernels/mrnf_kernels.hpp"
 #include "training/kernels/normal_consistency_loss.hpp"
 #include "training/kernels/normal_loss.hpp"
+#include "training/kernels/loss_weight_map.hpp"
 #include "training/kernels/roi_weight_map.hpp"
 #include "training/training_setup.hpp"
 #include "training_cropbox_mask.hpp"
@@ -1022,6 +1023,7 @@ namespace lfs::training {
         loss_accumulator_ = {};
         fused_scale_reg_loss_ = {};
         fused_opacity_reg_loss_ = {};
+        fused_opacity_binarize_loss_ = {};
         fused_erank_reg_loss_ = {};
         fused_dc_reg_loss_ = {};
         fused_sh_rest_reg_loss_ = {};
@@ -1661,7 +1663,18 @@ namespace lfs::training {
         const lfs::core::Tensor& corrected,
         const lfs::core::Tensor& gt_image,
         const lfs::core::param::OptimizationParameters& opt_params,
-        const lfs::core::Tensor& raw_rendered, const int iteration) {
+        const lfs::core::Tensor& raw_rendered, const int iteration, const bool generated_view) {
+        if (generated_view) {
+            // The normal loss still runs (and is discarded): its SSIM map feeds the densification error map.
+            auto photometric = compute_photometric_loss_with_gradient(corrected, gt_image, opt_params, raw_rendered,
+                                                                      iteration, false);
+            if (!photometric)
+                return photometric;
+            PhotometricLossResult result;
+            apply_generated_view_loss(corrected, gt_image, {}, opt_params, result.loss, result.grad_corrected);
+            return result;
+        }
+
         const bool use_decoupled_appearance_loss =
             raw_rendered.is_valid() &&
             raw_rendered.numel() > 0 &&
@@ -1701,6 +1714,305 @@ namespace lfs::training {
             .loss = loss_tensor,
             .grad_corrected = ctx.grad_image,
             .raw_residual = raw_residual};
+    }
+
+    bool Trainer::is_generated_view(const lfs::core::Camera& camera) const {
+        const auto& prefix = params_.optimization.generated_prefix;
+        if (prefix.empty())
+            return false;
+        const std::string_view name = camera.image_name();
+        const auto slash = name.find_last_of("/\\");
+        const std::string_view file = slash == std::string_view::npos ? name : name.substr(slash + 1);
+        return file.starts_with(prefix);
+    }
+
+    void Trainer::apply_generated_view_loss(
+        const lfs::core::Tensor& corrected, const lfs::core::Tensor& gt_image,
+        const lfs::core::Tensor& pixel_weight, const lfs::core::param::OptimizationParameters& opt_params,
+        lfs::core::Tensor& loss, lfs::core::Tensor& grad_corrected) {
+        if (!generated_view_stats_.is_valid())
+            generated_view_stats_ = lfs::core::Tensor::zeros(
+                {static_cast<size_t>(kernels::GENERATED_VIEW_STAT_COUNT)}, lfs::core::Device::CUDA);
+        const kernels::GeneratedViewLossParams params{
+            .lowpass_sigma = opt_params.generated_lowpass_sigma,
+            .texture_radius = opt_params.generated_texture_radius,
+            .lowpass_weight = opt_params.generated_lowpass_weight,
+            .texture_weight = opt_params.generated_texture_weight,
+            .pixel_weight = opt_params.generated_pixel_weight,
+            .loss_weight = opt_params.generated_loss_weight};
+        auto result = kernels::generated_view_loss(corrected, gt_image, pixel_weight, params,
+                                                   generated_view_loss_workspace_, &generated_view_stats_);
+        loss = result.loss;
+        grad_corrected = result.grad;
+    }
+
+    void Trainer::note_real_view_loss(const lfs::core::Tensor& loss) {
+        if (params_.optimization.generated_prefix.empty() || !loss.is_valid() || loss.numel() == 0)
+            return;
+        if (!generated_view_stats_.is_valid())
+            generated_view_stats_ = lfs::core::Tensor::zeros(
+                {static_cast<size_t>(kernels::GENERATED_VIEW_STAT_COUNT)}, lfs::core::Device::CUDA);
+        kernels::generated_view_stats_add_real(loss, generated_view_stats_);
+    }
+
+    void Trainer::log_generated_view_loss(const int iter) {
+        if (!generated_view_stats_.is_valid())
+            return;
+        const auto s = generated_view_stats_.to_vector(); // synchronizes; log cadence only
+        generated_view_stats_.zero_();
+        if (s.size() < static_cast<size_t>(kernels::GENERATED_VIEW_STAT_COUNT))
+            return;
+        const float views = s[kernels::GENERATED_VIEW_STAT_VIEWS];
+        const float real_views = s[kernels::GENERATED_VIEW_STAT_REAL_VIEWS];
+        const float real_loss = real_views > 0.0f ? s[kernels::GENERATED_VIEW_STAT_REAL_LOSS] / real_views : 0.0f;
+        if (views <= 0.0f) {
+            LOG_INFO("iter {}: no generated views since the last log; real-view photometric loss {:.5g} ({} views)",
+                     iter, real_loss, static_cast<int>(real_views));
+            return;
+        }
+        const auto mean = [&](const int k) { return s[k] / views; };
+        const float std_render = mean(kernels::GENERATED_VIEW_STAT_STD_RENDER);
+        const float std_target = mean(kernels::GENERATED_VIEW_STAT_STD_TARGET);
+        LOG_INFO("iter {}: generated-view loss {:.5g} over {} views (low-pass L1 {:.5g}, texture {:.5g}, pixel L1 {:.5g}; "
+                 "local luma std render {:.4g} / target {:.4g} = {:.3f}); real-view photometric loss {:.5g} ({} views)",
+                 iter, mean(kernels::GENERATED_VIEW_STAT_TOTAL), static_cast<int>(views),
+                 mean(kernels::GENERATED_VIEW_STAT_LOWPASS), mean(kernels::GENERATED_VIEW_STAT_TEXTURE),
+                 mean(kernels::GENERATED_VIEW_STAT_PIXEL), std_render, std_target,
+                 std_target > 0.0f ? std_render / std_target : 0.0f, real_loss, static_cast<int>(real_views));
+    }
+
+    namespace {
+        // LFS_LOSS_WEIGHT_DUMP=<folder> (debug check of --loss-weight-dir, default off): the first
+        // LFS_LOSS_WEIGHT_DUMP_N (default 4) weighted views' combined per-pixel weight, exactly as the loss uses it
+        // (the map resampled to the render size x the mask / ROI weight, border zeroed when it applies), is written as
+        // <folder>/<image name>.f32: int32 width, int32 height, float32 loss denominator, then height x width float32
+        // (row-major). Host copy, so it syncs the stream; for checks only.
+        std::string g_loss_weight_dump_name;
+        int g_loss_weight_dumped = 0;
+
+        void maybe_dump_loss_weight(const lfs::core::Tensor& weight, const float denominator) {
+            static const char* const dir = std::getenv("LFS_LOSS_WEIGHT_DUMP");
+            if (dir == nullptr || *dir == '\0' || !weight.is_valid() || weight.ndim() != 2)
+                return;
+            static const int limit = [] {
+                const char* n = std::getenv("LFS_LOSS_WEIGHT_DUMP_N");
+                return n != nullptr ? std::max(0, std::atoi(n)) : 4;
+            }();
+            if (g_loss_weight_dumped >= limit)
+                return;
+            ++g_loss_weight_dumped;
+            const auto host = weight.contiguous().cpu();
+            const int h = static_cast<int>(host.shape()[0]);
+            const int w = static_cast<int>(host.shape()[1]);
+            const auto folder = lfs::core::utf8_to_path(dir);
+            std::error_code ec;
+            std::filesystem::create_directories(folder, ec);
+            const auto path = folder / lfs::core::utf8_to_path(g_loss_weight_dump_name + ".f32");
+            std::ofstream f(path, std::ios::binary);
+            f.write(reinterpret_cast<const char*>(&w), sizeof(w));
+            f.write(reinterpret_cast<const char*>(&h), sizeof(h));
+            f.write(reinterpret_cast<const char*>(&denominator), sizeof(denominator));
+            f.write(reinterpret_cast<const char*>(host.ptr<float>()),
+                    static_cast<std::streamsize>(sizeof(float)) * w * h);
+            LOG_INFO("Loss weights: dumped the combined weight of '{}' ({}x{}, loss denominator {}) to {}",
+                     g_loss_weight_dump_name, w, h, denominator, lfs::core::path_to_utf8(path));
+        }
+    } // namespace
+
+    std::expected<void, std::string> Trainer::load_loss_weight_maps() {
+        loss_weight_maps_.clear();
+        loss_weight_log_views_ = loss_weight_log_weighted_ = 0;
+        loss_weight_log_mean_sum_ = 0.0;
+        loss_weight_log_min_ = std::numeric_limits<float>::infinity();
+        loss_weight_log_max_ = 0.0f;
+        const std::string& dir_utf8 = params_.optimization.loss_weight_dir;
+        if (dir_utf8.empty())
+            return {};
+        const auto dir = lfs::core::utf8_to_path(dir_utf8);
+        std::error_code ec;
+        if (!std::filesystem::is_directory(dir, ec))
+            return std::unexpected(std::format("--loss-weight-dir: '{}' is not a folder", dir_utf8));
+
+        struct Job {
+            int uid;
+            std::filesystem::path path;
+            std::string name;
+            int image_width;
+            int image_height;
+        };
+        std::vector<Job> jobs;
+        size_t cameras = 0;
+        std::string example;
+        for (const auto& cam : train_dataset_->get_cameras()) {
+            if (!cam)
+                continue;
+            ++cameras;
+            const std::string& name = cam->image_name();
+            if (example.empty())
+                example = name + ".png";
+            for (const char* ext : {".png", ".exr", ".tif", ".tiff"}) {
+                auto path = dir / lfs::core::utf8_to_path(name + ext);
+                if (std::filesystem::is_regular_file(path, ec)) {
+                    jobs.push_back({cam->uid(), std::move(path), name, cam->image_width(), cam->image_height()});
+                    break;
+                }
+            }
+        }
+        if (jobs.empty())
+            return std::unexpected(std::format(
+                "--loss-weight-dir: no weight map in '{}' for any of the {} training images (expected <image name>.png, e.g. '{}')",
+                dir_utf8, cameras, example));
+
+        // 16-bit PNG / TIFF: weight = value / 10000 (the loader normalizes integers to value / 65535); float: as is.
+        // Maps are smooth by design; wider than this they are box-downsampled to save host memory.
+        constexpr int kMaxStoredWidth = 2048;
+        std::vector<LossWeightMap> maps(jobs.size());
+        std::vector<std::string> errors(jobs.size());
+        std::atomic<size_t> next{0};
+        const auto decode = [&](const size_t j) {
+            const auto& job = jobs[j];
+            const float step = lfs::core::image_quantization_step(job.path);
+            if (step >= 1.0f / 1000.0f) {
+                errors[j] = "8-bit image (use a 16-bit PNG, weight = value / 10000, or a float EXR / TIFF)";
+                return;
+            }
+            const float scale = step > 0.0f ? 65535.0f / 10000.0f : 1.0f;
+            auto [data, width, height] = lfs::core::load_image_gray_high_bitdepth(job.path);
+            if (!data || width <= 0 || height <= 0) {
+                if (data)
+                    lfs::core::free_image_float(data);
+                errors[j] = "could not be read as a 16-bit or float grayscale image";
+                return;
+            }
+            const int factor = std::max(1, (width + kMaxStoredWidth - 1) / kMaxStoredWidth);
+            auto& map = maps[j];
+            map.width = (width + factor - 1) / factor;
+            map.height = (height + factor - 1) / factor;
+            map.values.assign(static_cast<size_t>(map.width) * map.height, 0.0f);
+            double sum = 0.0;
+            float lo = std::numeric_limits<float>::infinity(), hi = 0.0f;
+            bool bad = false;
+            for (int y = 0; y < map.height && !bad; ++y) {
+                for (int x = 0; x < map.width; ++x) {
+                    double acc = 0.0;
+                    int count = 0;
+                    for (int yy = y * factor; yy < std::min(height, (y + 1) * factor); ++yy)
+                        for (int xx = x * factor; xx < std::min(width, (x + 1) * factor); ++xx) {
+                            acc += data[static_cast<size_t>(yy) * width + xx];
+                            ++count;
+                        }
+                    const float v = static_cast<float>(acc / count) * scale;
+                    if (!std::isfinite(v) || v < 0.0f) {
+                        bad = true;
+                        break;
+                    }
+                    map.values[static_cast<size_t>(y) * map.width + x] = v;
+                    sum += v;
+                    lo = std::min(lo, v);
+                    hi = std::max(hi, v);
+                }
+            }
+            lfs::core::free_image_float(data);
+            if (bad) {
+                errors[j] = "holds a negative or non-finite weight";
+                map = {};
+                return;
+            }
+            map.mean = static_cast<float>(sum / static_cast<double>(map.values.size()));
+            map.min = lo;
+            map.max = hi;
+        };
+        {
+            const unsigned workers = std::clamp(std::thread::hardware_concurrency(), 1u, 16u);
+            std::vector<std::jthread> pool;
+            for (unsigned t = 0; t < workers; ++t)
+                pool.emplace_back([&]() {
+                    for (size_t j = next.fetch_add(1); j < jobs.size(); j = next.fetch_add(1))
+                        decode(j);
+                });
+        }
+        for (size_t j = 0; j < jobs.size(); ++j)
+            if (!errors[j].empty())
+                return std::unexpected(std::format("--loss-weight-dir: '{}' {}", lfs::core::path_to_utf8(jobs[j].path),
+                                                   errors[j]));
+
+        double mean_sum = 0.0;
+        float lo = std::numeric_limits<float>::infinity(), hi = 0.0f;
+        size_t aspect_mismatch = 0;
+        std::string first_mismatch;
+        for (size_t j = 0; j < jobs.size(); ++j) {
+            const auto& map = maps[j];
+            mean_sum += map.mean;
+            lo = std::min(lo, map.min);
+            hi = std::max(hi, map.max);
+            if (jobs[j].image_width > 0 && jobs[j].image_height > 0) {
+                const double image_aspect = static_cast<double>(jobs[j].image_width) / jobs[j].image_height;
+                const double map_aspect = static_cast<double>(map.width) / map.height;
+                if (std::abs(map_aspect / image_aspect - 1.0) > 0.02 && aspect_mismatch++ == 0)
+                    first_mismatch = std::format("{} is {}x{} for a {}x{} image", jobs[j].name, map.width, map.height,
+                                                 jobs[j].image_width, jobs[j].image_height);
+            }
+            loss_weight_maps_.emplace(jobs[j].uid, std::move(maps[j]));
+        }
+        const auto& first = loss_weight_maps_.at(jobs.front().uid);
+        LOG_INFO("Loss weights: {} of {} training images have a map in {} (first {}x{}; mean weight over the maps {:.4f}, "
+                 "range {:.3g}-{:.3g}); the per-pixel L1 and SSIM terms and the densification error map are multiplied "
+                 "by it, images without a map use weight 1",
+                 jobs.size(), cameras, dir_utf8, first.width, first.height,
+                 mean_sum / static_cast<double>(jobs.size()), lo, hi);
+        if (jobs.size() < cameras)
+            LOG_WARN("Loss weights: {} training images have no map (weight 1)", cameras - jobs.size());
+        if (aspect_mismatch > 0)
+            LOG_WARN("Loss weights: {} maps have a different aspect ratio than their image (e.g. {}); they are "
+                     "stretched to the image", aspect_mismatch, first_mismatch);
+        return {};
+    }
+
+    lfs::core::Tensor Trainer::prepare_loss_weight(const lfs::core::Camera& camera, const int width, const int height) {
+        if (loss_weight_maps_.empty() || width <= 0 || height <= 0)
+            return {};
+        ++loss_weight_log_views_;
+        const auto it = loss_weight_maps_.find(camera.uid());
+        if (it == loss_weight_maps_.end()) {
+            loss_weight_log_mean_sum_ += 1.0;
+            return {};
+        }
+        const auto& map = it->second;
+        g_loss_weight_dump_name = camera.image_name(); // LFS_LOSS_WEIGHT_DUMP only
+        using namespace lfs::core;
+        const cudaStream_t stream = getCurrentCUDAStream();
+        const TensorShape source_shape{static_cast<size_t>(map.height), static_cast<size_t>(map.width)};
+        if (!loss_weight_source_.is_valid() || loss_weight_source_.shape() != source_shape)
+            loss_weight_source_ = Tensor::empty(source_shape, Device::CUDA, DataType::Float32);
+        loss_weight_source_.set_stream(stream);
+        LFS_CUDA_CHECK(cudaMemcpyAsync(loss_weight_source_.ptr<float>(), map.values.data(),
+                                       map.values.size() * sizeof(float), cudaMemcpyHostToDevice, stream));
+        if (loss_weight_map_.is_valid())
+            loss_weight_map_.set_stream(stream);
+        kernels::resample_loss_weight_map(loss_weight_source_.ptr<float>(), map.width, map.height, loss_weight_map_,
+                                          width, height);
+        ++loss_weight_log_weighted_;
+        loss_weight_log_mean_sum_ += map.mean;
+        loss_weight_log_min_ = std::min(loss_weight_log_min_, map.min);
+        loss_weight_log_max_ = std::max(loss_weight_log_max_, map.max);
+        return loss_weight_map_;
+    }
+
+    void Trainer::log_loss_weights(const int iter) {
+        if (loss_weight_log_views_ <= 0)
+            return;
+        if (loss_weight_log_weighted_ > 0)
+            LOG_INFO("iter {}: loss weight maps on {} of {} views since the last log (mean weight over those views "
+                     "{:.4f}, missing maps counted as 1; map range {:.3g}-{:.3g})",
+                     iter, loss_weight_log_weighted_, loss_weight_log_views_,
+                     loss_weight_log_mean_sum_ / static_cast<double>(loss_weight_log_views_),
+                     loss_weight_log_min_, loss_weight_log_max_);
+        else
+            LOG_INFO("iter {}: no loss weight map on the {} views since the last log", iter, loss_weight_log_views_);
+        loss_weight_log_views_ = loss_weight_log_weighted_ = 0;
+        loss_weight_log_mean_sum_ = 0.0;
+        loss_weight_log_min_ = std::numeric_limits<float>::infinity();
+        loss_weight_log_max_ = 0.0f;
     }
 
     std::expected<void, std::string> Trainer::validate_masks() {
@@ -1779,7 +2091,8 @@ namespace lfs::training {
         const lfs::core::Tensor& alpha,
         const lfs::core::param::OptimizationParameters& opt_params,
         const lfs::core::Tensor& raw_rendered,
-        const lfs::core::Tensor& structure_map, const int iteration) {
+        const lfs::core::Tensor& structure_map, const int iteration, const bool generated_view,
+        const lfs::core::Tensor& loss_weight) {
 
         using namespace lfs::core;
         constexpr float ALPHA_CONSISTENCY_WEIGHT = 10.0f;
@@ -1828,6 +2141,30 @@ namespace lfs::training {
                 static_cast<int>(gt_image.shape()[2]), opt_params.lambda_dssim > 0.0f);
         }
 
+        // --loss-weight-dir: the per-pixel L1 and D-SSIM terms are multiplied by the weight map while the mean keeps
+        // the unweighted denominator (the mask's pixel count, as the thin-structure weights do), so a view whose map
+        // averages above 1 pulls harder. Without a mask / ROI the unmasked loss's valid padding (5 px border, with
+        // SSIM) is reproduced by zero weights there. Generated views keep their own loss (mask / ROI weights only).
+        if (loss_weight.is_valid() && loss_weight.numel() > 0 && !generated_view) {
+            LFS_ASSERT_MSG(loss_weight.ndim() == 2 && loss_weight.shape()[0] == gt_image.shape()[1] &&
+                               loss_weight.shape()[1] == gt_image.shape()[2],
+                           "loss weight map must match the image size");
+            if (structure_map.is_valid()) {
+                // Already base * structure weight (border zeroed when needed) with its base denominator.
+                kernels::combine_loss_weight(loss_weight, thin_structure_weight_buffer_, 0,
+                                             thin_structure_weight_buffer_);
+            } else {
+                const bool valid_padding = !base_photometric_weight.is_valid() && opt_params.lambda_dssim > 0.0f;
+                const Tensor base = base_photometric_weight.is_valid() ? base_photometric_weight.contiguous() : Tensor{};
+                kernels::combine_loss_weight(loss_weight, base, valid_padding ? 5 : 0, loss_weight_combined_);
+                photometric_weight = loss_weight_combined_;
+                base_denominator = kernels::structure_base_denominator(
+                    base, static_cast<int>(gt_image.shape()[1]), static_cast<int>(gt_image.shape()[2]),
+                    valid_padding);
+            }
+            maybe_dump_loss_weight(photometric_weight, base_denominator);
+        }
+
         Tensor loss, grad_corrected, grad_alpha;
         std::optional<lfs::training::kernels::DecoupledRawGradient> raw_gradient;
         std::optional<RawGradientResidual> raw_residual;
@@ -1867,6 +2204,15 @@ namespace lfs::training {
                 }
             }
 
+            if (generated_view) {
+                // Generated view: the alignment-tolerant loss replaces L1 + SSIM, under the same mask / ROI
+                // weights (not the thin-structure reweighting). The normal loss above still ran: its SSIM map
+                // feeds the densification error map.
+                apply_generated_view_loss(corrected, gt_image, base_photometric_weight, opt_params, loss,
+                                          grad_corrected);
+                raw_gradient.reset();
+            }
+
             // The loss already reads this normalization; epsilon alone means no contributing pixels.
             if (has_user_mask && mode == param::MaskMode::Ignore && !empty_ignore_mask_warned_ &&
                 mask_normalization <= kernels::SSIM_EPSILON) {
@@ -1893,7 +2239,8 @@ namespace lfs::training {
                 loss = loss + penalty.loss;
             }
         } else {
-            auto fallback = compute_photometric_loss_with_gradient(corrected, gt_image, opt_params, raw_rendered, iteration);
+            auto fallback = compute_photometric_loss_with_gradient(corrected, gt_image, opt_params, raw_rendered, iteration,
+                                                                   generated_view);
             if (!fallback) {
                 return std::unexpected(fallback.error());
             }
@@ -1925,7 +2272,7 @@ namespace lfs::training {
             grad_alpha = alpha_term.grad_alpha;
         }
 
-        if (photometric_weight.is_valid())
+        if (photometric_weight.is_valid() && !generated_view)
             add_gradient_residual(corrected, gt_image, raw_rendered, base_photometric_weight,
                                   opt_params, iteration, loss, grad_corrected, raw_residual);
 
@@ -3041,6 +3388,11 @@ namespace lfs::training {
                 return std::unexpected(result.error());
             }
 
+            // Per-pixel photometric loss weights (--loss-weight-dir)
+            if (auto result = load_loss_weight_maps(); !result) {
+                return std::unexpected(result.error());
+            }
+
             // Apply undistortion to camera intrinsics (params already precomputed at load time)
             if (params.optimization.undistort) {
                 int prepared = 0;
@@ -3060,6 +3412,16 @@ namespace lfs::training {
                 if (prepared > 0) {
                     LOG_INFO("Prepared undistortion for {} cameras", prepared);
                 }
+            }
+            if (params.optimization.native_fisheye && !params.optimization.gut) {
+                int native = 0;
+                for (auto& cam : train_dataset_->get_cameras()) {
+                    if (cam && cam->camera_model_type() == core::CameraModelType::FISHEYE && !cam->is_undistort_prepared())
+                        ++native;
+                }
+                LOG_INFO("Native fisheye: {} training cameras are projected through their fisheye lens by the "
+                         "standard rasterizer (images and masks stay in fisheye space)",
+                         native);
             }
 
             // Initialize background color tensor from params
@@ -3220,6 +3582,84 @@ namespace lfs::training {
 
             // Print configuration
             LOG_INFO("Strategy: {}", params.optimization.strategy);
+            if (core::param::is_mrnf_strategy(params.optimization.strategy)) {
+                const auto mrnf_defaults = lfs::core::param::OptimizationParameters::mrnf_defaults();
+                if (params.optimization.opacity_decay != mrnf_defaults.opacity_decay ||
+                    params.optimization.scale_decay != mrnf_defaults.scale_decay)
+                    LOG_INFO("MRNF decay per refine: opacity {}, scale {}",
+                             params.optimization.opacity_decay, params.optimization.scale_decay);
+                if (params.optimization.growth_visit_normalize)
+                    LOG_INFO("MRNF growth: splats ranked by a per-visit statistic of their error signal ({}) and their "
+                             "mean edge score per visit (growth_visit_normalize), threshold {} on that statistic",
+                             params.optimization.growth_visit_stat == "weighted"
+                                 ? "sum of squares / sum, the signal-weighted mean"
+                                 : "sum / visits, the mean per visit",
+                             params.optimization.growth_grad_threshold);
+            } else if (params.optimization.growth_visit_normalize) {
+                LOG_WARN("growth_visit_normalize only affects the MRNF strategy; ignored");
+            }
+            if (params.optimization.opacity_binarize_weight > 0.0f)
+                LOG_INFO("Opacity binarize loss: weight {} from iteration {}",
+                         params.optimization.opacity_binarize_weight, params.optimization.opacity_binarize_start);
+            if (screen_share_cap_active(params.optimization.max_screen_share)) {
+                if (params.optimization.screen_share_axis != "max" && params.optimization.gut)
+                    LOG_WARN("screen_share_axis {} needs the standard rasterizer (GUT measures a projected box area); "
+                             "the longest axis is used with --gut",
+                             params.optimization.screen_share_axis);
+                const int ss_axis = screen_share_axis_code(params.optimization);
+                LOG_INFO("Screen-share cap {} (penalty {}), measured on the {}",
+                         params.optimization.max_screen_share, params.optimization.screen_share_penalty,
+                         ss_axis == kScreenShareAxisWeighted
+                             ? std::format("area radius of the two longest axes; every axis pushed by (s_i / s_max)^{} "
+                                           "(screen_share_axis weighted, falloff {})",
+                                           params.optimization.screen_share_falloff,
+                                           params.optimization.screen_share_falloff)
+                         : ss_axis == kScreenShareAxisArea
+                             ? std::string("area radius of the two longest axes (screen_share_axis area; the shortest "
+                                           "axis is never shrunk)")
+                             : std::string("longest axis (screen_share_axis max)"));
+            }
+            if (params.optimization.distortion_weight > 0.0f) {
+                if (params.optimization.gut)
+                    LOG_WARN("Depth distortion loss needs the standard rasterizer; ignored with --gut");
+                else
+                    LOG_INFO("Depth distortion loss: weight {} from iteration {}, depth mapping near {} far {}, "
+                             "depth {}{}, {}; {}",
+                             params.optimization.distortion_weight, params.optimization.distortion_start,
+                             params.optimization.distortion_near, params.optimization.distortion_far,
+                             params.optimization.distortion_depth,
+                             params.optimization.distortion_depth == "z"
+                                 ? " (camera z on the pinhole path: the old behaviour)"
+                                 : " (from the camera centre)",
+                             params.optimization.distortion_skip_plane_crossing > 0.0f
+                                 ? std::format("splats whose {}-sigma extent crosses the camera plane left out",
+                                               params.optimization.distortion_skip_plane_crossing)
+                                 : std::string("no plane-crossing splats left out"),
+                             params.optimization.distortion_min_dist > 0.0f
+                                 ? std::format("splats nearer than {} left out (min-dist)",
+                                               params.optimization.distortion_min_dist)
+                                 : std::string("no min-dist"));
+            }
+            if (!params.optimization.generated_prefix.empty()) {
+                size_t generated = 0;
+                size_t total = 0;
+                for (const auto& cam : train_dataset_->get_cameras()) {
+                    if (!cam)
+                        continue;
+                    ++total;
+                    if (is_generated_view(*cam))
+                        ++generated;
+                }
+                const auto& o = params.optimization;
+                LOG_INFO("Generated-view loss: {} of {} training images start with '{}'; they use {} * ({} * low-pass L1 "
+                         "(Gaussian sigma {} px) + {} * local luma std difference (window radius {} px) + {} * pixel L1) "
+                         "instead of L1 + SSIM",
+                         generated, total, o.generated_prefix, o.generated_loss_weight, o.generated_lowpass_weight,
+                         o.generated_lowpass_sigma, o.generated_texture_weight, o.generated_texture_radius,
+                         o.generated_pixel_weight);
+                if (generated == 0)
+                    LOG_WARN("--generated-prefix '{}' matches no training image", o.generated_prefix);
+            }
             if (params.optimization.mask_mode != lfs::core::param::MaskMode::None) {
                 static constexpr const char* MASK_MODE_NAMES[] = {"none", "segment", "ignore", "segment_and_ignore", "alpha_consistent"};
                 LOG_INFO("Mask mode: {}", MASK_MODE_NAMES[static_cast<int>(params.optimization.mask_mode)]);
@@ -6093,6 +6533,9 @@ namespace lfs::training {
         };
     } // namespace
 
+    // Cadence (iterations) of the info-log lines for the opacity binarize and distortion losses.
+    static constexpr int kExtraLossLogInterval = 500;
+
     lfs::Result<Trainer::StepDisposition> Trainer::train_step(
         int iter,
         lfs::core::Camera* cam,
@@ -6138,6 +6581,12 @@ namespace lfs::training {
                             .detection = LFS_SOURCE_SITE_CURRENT(),
                         });
                     }
+                } else if (params_.optimization.native_fisheye &&
+                           cam->camera_model_type() == core::CameraModelType::FISHEYE &&
+                           !cam->is_undistort_prepared() &&
+                           cam->tangential_distortion().numel() == 0) {
+                    // --native-fisheye: the standard rasterizer projects through the fisheye lens
+                    // itself (fastgs_lens_for_camera); images and masks stay in fisheye space.
                 } else if (!params_.optimization.undistort || !cam->is_undistort_prepared()) {
                     if (cam->radial_distortion().numel() != 0 ||
                         cam->tangential_distortion().numel() != 0) {
@@ -6338,6 +6787,8 @@ namespace lfs::training {
                                                                           (core::param::is_mrnf_strategy(step_params.strategy) &&
                                                                            step_params.use_error_map));
                 const bool use_ssim_error = use_pixel_error_densification;
+                // --generated-prefix: this view's photometric loss is the alignment-tolerant generated-view loss.
+                const bool generated_view = is_generated_view(*cam);
                 DensificationType densification_type = DensificationType::None;
                 if (!in_popspa && step_params.strategy == "mcmc")
                     densification_type = DensificationType::MCMC;
@@ -6485,6 +6936,21 @@ namespace lfs::training {
                 lfs::core::Tensor impact_peak_scratch;
                 lfs::core::Tensor fused_scale_reg_loss_gpu;
                 lfs::core::Tensor fused_opacity_reg_loss_gpu;
+                lfs::core::Tensor fused_opacity_binarize_loss_gpu;
+                // Depth distortion (standard rasterizer, iterations with a Gaussian backward), from
+                // distortion_start on. The forward accumulates the loss; the backward its gradients.
+                const bool distortion_active = run_fastgs_gaussian_backward && !in_popspa &&
+                                               step_params.distortion_weight > 0.0f &&
+                                               static_cast<size_t>(iter) >= step_params.distortion_start;
+                lfs::core::Tensor distortion_loss_gpu;
+                lfs::core::Tensor distortion_left_out_gpu;
+                int distortion_n_visible = 0;
+                // Opacity binarization w * mean(o (1 - o)), active from opacity_binarize_start on.
+                const float opacity_binarize_weight =
+                    (step_params.opacity_binarize_weight > 0.0f &&
+                     static_cast<size_t>(iter) >= step_params.opacity_binarize_start)
+                        ? step_params.opacity_binarize_weight
+                        : 0.0f;
                 lfs::core::Tensor fused_erank_reg_loss_gpu;
                 lfs::core::Tensor fused_dc_reg_loss_gpu;
                 lfs::core::Tensor fused_sh_rest_reg_loss_gpu;
@@ -6603,6 +7069,17 @@ namespace lfs::training {
                                 fused_opacity_reg_loss_.ptr<float>();
                             fused_opacity_reg_loss_gpu = fused_opacity_reg_loss_;
                         }
+                        if (opacity_binarize_weight > 0.0f) {
+                            fused_extra_gradients.opacity_binarize_weight = opacity_binarize_weight;
+                            if (!fused_opacity_binarize_loss_.is_valid()) {
+                                fused_opacity_binarize_loss_ = lfs::core::Tensor::zeros(
+                                    {1}, lfs::core::Device::CUDA);
+                            }
+                            fused_opacity_binarize_loss_.zero_();
+                            fused_extra_gradients.opacity_binarize_loss_out =
+                                fused_opacity_binarize_loss_.ptr<float>();
+                            fused_opacity_binarize_loss_gpu = fused_opacity_binarize_loss_;
+                        }
                     } else {
                         // Freeze / non-backward FastGS iterations: keep legacy loss-only
                         // path so reported loss stays valid without a fused backward.
@@ -6641,6 +7118,23 @@ namespace lfs::training {
                                     .error();
                             }
                             fused_opacity_reg_loss_gpu = *opacity_loss_result;
+                        }
+                        if (opacity_binarize_weight > 0.0f) {
+                            auto binarize_loss_result =
+                                lfs::training::losses::OpacityBinarizeRegularization::forward_loss_only(
+                                    model.opacity_raw(), {.weight = opacity_binarize_weight});
+                            if (!binarize_loss_result) {
+                                return lfs::from_legacy_expected<StepDisposition>(
+                                           std::unexpected(binarize_loss_result.error()),
+                                           lfs::LegacyErrorContext{
+                                               .code = lfs::ErrorCode::Internal,
+                                               .domain = lfs::ErrorDomain::Training,
+                                               .operation = "opacity binarize forward (fastgs)",
+                                               .source = LFS_SOURCE_SITE_CURRENT(),
+                                           })
+                                    .error();
+                            }
+                            fused_opacity_binarize_loss_gpu = *binarize_loss_result;
                         }
                     }
                 }
@@ -6752,14 +7246,31 @@ namespace lfs::training {
                             unsigned forward_attempts = 0;
                             for (;;) {
                                 ++forward_attempts;
+                                FastGSDistortionOptions distortion_options;
+                                if (distortion_active) {
+                                    distortion_options.weight = step_params.distortion_weight;
+                                    distortion_options.near_n = step_params.distortion_near;
+                                    distortion_options.far_n = step_params.distortion_far;
+                                    distortion_options.depth_distance = step_params.distortion_depth != "z";
+                                    distortion_options.plane_sigma = step_params.distortion_skip_plane_crossing;
+                                    distortion_options.min_dist = step_params.distortion_min_dist;
+                                    distortion_options.count_left_out =
+                                        (step_params.distortion_skip_plane_crossing > 0.0f || step_params.distortion_min_dist > 0.0f) &&
+                                        iter % kExtraLossLogInterval == 0;
+                                }
                                 auto rasterize_result = fast_rasterize_forward(
                                     *cam, strategy_->get_model(), bg,
                                     0, 0, 0, 0,
                                     step_params.mip_filter, bg_tile,
-                                    render_normal, render_depth);
+                                    render_normal, render_depth,
+                                    1.0f, true, distortion_options,
+                                    screen_share_axis_code(step_params));
                                 if (rasterize_result) {
                                     output = std::move(rasterize_result->first);
                                     fast_ctx.emplace(std::move(rasterize_result->second));
+                                    distortion_loss_gpu = fast_ctx->distortion_loss;
+                                    distortion_left_out_gpu = fast_ctx->distortion_left_out;
+                                    distortion_n_visible = fast_ctx->forward_ctx.n_visible;
                                     break;
                                 }
 
@@ -6932,6 +7443,11 @@ namespace lfs::training {
                         roi_weight.sync_to_stream(lfs::core::getCurrentCUDAStream());
                     }
 
+                    // --loss-weight-dir: this view's per-pixel weight at the render size (invalid = weight 1).
+                    // Generated views keep their own loss and are not weighted.
+                    const lfs::core::Tensor loss_weight =
+                        generated_view ? lfs::core::Tensor{} : prepare_loss_weight(*cam, output.width, output.height);
+
                     current_phase = StepPhase::Loss;
                     if (in_controller_phase) {
                         // Controller phase: forward through ISP with controller params, photometric loss,
@@ -6993,13 +7509,13 @@ namespace lfs::training {
                                 use_mask && params_.optimization.mask_mode != lfs::core::param::MaskMode::AlphaConsistent
                                     ? mask
                                     : lfs::core::Tensor{});
-                            if (use_mask || roi_weight.is_valid() || structure_map.is_valid()) {
+                            if (use_mask || roi_weight.is_valid() || structure_map.is_valid() || loss_weight.is_valid()) {
 
                                 lfs::core::Tensor mask_tile = mask;
 
                                 auto result = compute_photometric_loss_with_mask(
                                     corrected_image, gt_tile, mask_tile, roi_weight, output.alpha,
-                                    step_params, raw_loss_input, structure_map, iter);
+                                    step_params, raw_loss_input, structure_map, iter, generated_view, loss_weight);
                                 if (!result) {
                                     nvtxRangePop();
                                     nvtxRangePop();
@@ -7018,7 +7534,7 @@ namespace lfs::training {
                                 tile_grad = result->grad_corrected;
                             } else {
                                 auto result = compute_photometric_loss_with_gradient(
-                                    corrected_image, gt_tile, step_params, raw_loss_input, iter);
+                                    corrected_image, gt_tile, step_params, raw_loss_input, iter, generated_view);
                                 if (!result) {
                                     nvtxRangePop();
                                     nvtxRangePop();
@@ -7212,6 +7728,7 @@ namespace lfs::training {
                                               (cam->has_mask() || (step_params.use_alpha_as_mask && cam->has_alpha()));
                         const bool used_masked_fused =
                             (step_params.thin_structure_weight > 0.0f || roi_weight.is_valid() ||
+                             loss_weight.is_valid() ||
                              (use_mask &&
                               (step_params.mask_mode == lfs::core::param::MaskMode::Segment ||
                                step_params.mask_mode == lfs::core::param::MaskMode::Ignore ||
@@ -7238,11 +7755,11 @@ namespace lfs::training {
                                 use_mask && params_.optimization.mask_mode != lfs::core::param::MaskMode::AlphaConsistent
                                     ? mask_tile
                                     : lfs::core::Tensor{});
-                            if (use_mask || roi_weight.is_valid() || structure_map.is_valid()) {
+                            if (use_mask || roi_weight.is_valid() || structure_map.is_valid() || loss_weight.is_valid()) {
 
                                 auto result = compute_photometric_loss_with_mask(
                                     corrected_image, gt_tile, mask_tile, roi_weight, output.alpha,
-                                    step_params, raw_loss_input, structure_map, iter);
+                                    step_params, raw_loss_input, structure_map, iter, generated_view, loss_weight);
                                 if (!result) {
                                     nvtxRangePop();
                                     nvtxRangePop();
@@ -7264,7 +7781,7 @@ namespace lfs::training {
                                 normal_terms_weight = result->normal_pixel_weight;
                             } else {
                                 auto result = compute_photometric_loss_with_gradient(
-                                    corrected_image, gt_tile, step_params, raw_loss_input, iter);
+                                    corrected_image, gt_tile, step_params, raw_loss_input, iter, generated_view);
                                 if (!result) {
                                     nvtxRangePop();
                                     nvtxRangePop();
@@ -7283,6 +7800,8 @@ namespace lfs::training {
                                 tile_raw_gradient = result->raw_gradient;
                                 tile_raw_residual = result->raw_residual;
                             }
+                            if (!generated_view)
+                                note_real_view_loss(tile_loss); // no-op without --generated-prefix
                         }
 
                         if ((run_fastgs_gaussian_backward || run_gut_gaussian_backward) &&
@@ -7836,6 +8355,13 @@ namespace lfs::training {
                                 map_mean.ptr<float>(), 1e-6f);
                         }
 
+                        // --loss-weight-dir: growth credit follows the loss weights. Applied after MRNF's per-view
+                        // normalization so a view whose map averages above 1 also gives more credit.
+                        if (tile_error_map.is_valid() && loss_weight.is_valid() &&
+                            tile_error_map.numel() == loss_weight.numel()) {
+                            tile_error_map.mul_(loss_weight.reshape(tile_error_map.shape()));
+                        }
+
                         if (live_vram_profiler_enabled()) {
                             if (fast_ctx) {
                                 record_fastgs_vram_breakdown(*fast_ctx,
@@ -8093,6 +8619,65 @@ namespace lfs::training {
                         }
                         nvtxRangePop();
                     }
+
+                    if (opacity_binarize_weight > 0.0f) {
+                        if (!fastgs_path) {
+                            auto binarize_loss_result =
+                                lfs::training::losses::OpacityBinarizeRegularization::forward(
+                                    strategy_->get_model().opacity_raw(),
+                                    gaussian_optimizer.get_grad(ParamType::Opacity),
+                                    {.weight = opacity_binarize_weight});
+                            if (!binarize_loss_result) {
+                                return lfs::from_legacy_expected<StepDisposition>(
+                                           std::unexpected(binarize_loss_result.error()),
+                                           lfs::LegacyErrorContext{
+                                               .code = lfs::ErrorCode::Internal,
+                                               .domain = lfs::ErrorDomain::Training,
+                                               .operation = "opacity binarize loss",
+                                               .source = LFS_SOURCE_SITE_CURRENT(),
+                                           })
+                                    .error();
+                            }
+                            fused_opacity_binarize_loss_gpu = *binarize_loss_result;
+                        }
+                        if (fused_opacity_binarize_loss_gpu.is_valid()) {
+                            if (iter % kExtraLossLogInterval == 0) {
+                                // Synchronous readback at the log cadence only.
+                                const float loss_before = loss_tensor_gpu.item<float>();
+                                const float binarize_loss = fused_opacity_binarize_loss_gpu.item<float>();
+                                LOG_INFO("iter {}: opacity binarize loss {:.6g} (weight {}, mean o(1-o) {:.4g}); "
+                                         "image + other losses {:.6g}",
+                                         iter, binarize_loss, opacity_binarize_weight,
+                                         binarize_loss / opacity_binarize_weight, loss_before);
+                            }
+                            loss_tensor_gpu = loss_tensor_gpu + fused_opacity_binarize_loss_gpu;
+                        }
+                    }
+
+                    if (distortion_loss_gpu.is_valid()) {
+                        if (iter % kExtraLossLogInterval == 0) {
+                            // Synchronous readback at the log cadence only.
+                            const float loss_before = loss_tensor_gpu.item<float>();
+                            const float distortion_loss = distortion_loss_gpu.item<float>();
+                            LOG_INFO("iter {}: depth distortion loss {:.6g} (weight {}, mean per pixel {:.4g}); "
+                                     "image + other losses {:.6g}",
+                                     iter, distortion_loss, step_params.distortion_weight,
+                                     distortion_loss / step_params.distortion_weight, loss_before);
+                            if (distortion_left_out_gpu.is_valid()) {
+                                const auto left_out = distortion_left_out_gpu.to_vector(); // [plane-crossing, nearer than min-dist]
+                                if (left_out.size() >= 2)
+                                    LOG_INFO("iter {}: depth distortion: {} + {} of {} visible splats left out (plane-crossing + nearer than min-dist)",
+                                             iter, static_cast<long long>(left_out[0]), static_cast<long long>(left_out[1]),
+                                             distortion_n_visible);
+                            }
+                        }
+                        loss_tensor_gpu = loss_tensor_gpu + distortion_loss_gpu;
+                    }
+
+                    if (!params_.optimization.generated_prefix.empty() && iter % kExtraLossLogInterval == 0)
+                        log_generated_view_loss(iter); // means since the last log; synchronizes at this cadence only
+                    if (!loss_weight_maps_.empty() && iter % kExtraLossLogInterval == 0)
+                        log_loss_weights(iter); // host-side sums only
 
                     if (!in_popspa && bilateral_grid_ && step_params.bilateral_grid_active()) {
                         const bool grid_active_this_iter =

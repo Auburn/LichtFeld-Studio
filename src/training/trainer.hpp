@@ -16,6 +16,7 @@
 #include "dataset.hpp"
 #include "io/project_recovery.hpp"
 #include "kernels/depth_loss.hpp"
+#include "kernels/generated_view_loss.hpp"
 #include "kernels/gradient_residual.hpp"
 #include "kernels/thin_structure.hpp"
 #include "lfs/kernels/ssim.cuh"
@@ -620,7 +621,21 @@ namespace lfs::training {
             const lfs::core::Tensor& gt_image,
             const lfs::core::param::OptimizationParameters& opt_params,
             const lfs::core::Tensor& raw_rendered,
-            int iteration = 0);
+            int iteration = 0,
+            bool generated_view = false);
+
+        // --generated-prefix: is this training image a generated view (file name starts with the prefix)?
+        [[nodiscard]] bool is_generated_view(const lfs::core::Camera& camera) const;
+        // Replaces the photometric loss and its gradient w.r.t. the corrected image by the generated-view loss
+        // (kernels/generated_view_loss.hpp), weighted by pixel_weight (mask / ROI; invalid = all pixels).
+        void apply_generated_view_loss(
+            const lfs::core::Tensor& corrected, const lfs::core::Tensor& gt_image,
+            const lfs::core::Tensor& pixel_weight, const lfs::core::param::OptimizationParameters& opt_params,
+            lfs::core::Tensor& loss, lfs::core::Tensor& grad_corrected);
+        // Adds a real view's photometric loss to the generated-view log sums (only with --generated-prefix).
+        void note_real_view_loss(const lfs::core::Tensor& loss);
+        // Logs and resets the generated-view loss sums (log cadence only; synchronizes).
+        void log_generated_view_loss(int iter);
 
         void add_gradient_residual(
             const core::Tensor& corrected, const core::Tensor& target,
@@ -647,10 +662,20 @@ namespace lfs::training {
             const lfs::core::param::OptimizationParameters& opt_params,
             const lfs::core::Tensor& raw_rendered,
             const lfs::core::Tensor& structure_map = {},
-            int iteration = 0);
+            int iteration = 0,
+            bool generated_view = false,
+            const lfs::core::Tensor& loss_weight = {});
 
         // Validate masks exist for all cameras when mask mode is enabled
         std::expected<void, std::string> validate_masks();
+
+        // --loss-weight-dir: reads <dir>/<image name>.png (or .exr / .tif / .tiff) for every training camera.
+        std::expected<void, std::string> load_loss_weight_maps();
+        // This camera's weight map at the render size ([height, width] Float32 on the current stream), or an
+        // invalid tensor when the option is off or the camera has no map (weight 1).
+        lfs::core::Tensor prepare_loss_weight(const lfs::core::Camera& camera, int width, int height);
+        // Logs and resets the loss-weight sums (log cadence only).
+        void log_loss_weights(int iter);
 
         // Returns GPU tensor for loss (avoid sync!)
         std::expected<lfs::core::Tensor, std::string> compute_scale_reg_loss(
@@ -944,6 +969,7 @@ namespace lfs::training {
         // persistent FastGS scale/opacity reg loss scalars (filled in fused bwd)
         core::Tensor fused_scale_reg_loss_;
         core::Tensor fused_opacity_reg_loss_;
+        core::Tensor fused_opacity_binarize_loss_;
         core::Tensor fused_erank_reg_loss_;
         core::Tensor fused_dc_reg_loss_;
         core::Tensor fused_sh_rest_reg_loss_;
@@ -1031,6 +1057,30 @@ namespace lfs::training {
         kernels::GradientResidualWorkspace gradient_residual_workspace_;
         core::Tensor thin_structure_map_buffer_;
         core::Tensor thin_structure_weight_buffer_;
+        // --generated-prefix: generated-view loss workspace and the device sums logged every few hundred iterations.
+        kernels::GeneratedViewLossWorkspace generated_view_loss_workspace_;
+        core::Tensor generated_view_stats_;
+
+        // --loss-weight-dir: the maps by camera uid (host, at file resolution or box-downsampled to at most
+        // 2048 px wide), the device copy of the current one, its resample to the render size and its product with
+        // the mask / ROI weight; plus the log sums since the last log line.
+        struct LossWeightMap {
+            std::vector<float> values;
+            int width = 0;
+            int height = 0;
+            float mean = 1.0f;
+            float min = 1.0f;
+            float max = 1.0f;
+        };
+        std::unordered_map<int, LossWeightMap> loss_weight_maps_;
+        core::Tensor loss_weight_source_;
+        core::Tensor loss_weight_map_;
+        core::Tensor loss_weight_combined_;
+        double loss_weight_log_mean_sum_ = 0.0;
+        float loss_weight_log_min_ = 1.0f;
+        float loss_weight_log_max_ = 1.0f;
+        int loss_weight_log_views_ = 0;
+        int loss_weight_log_weighted_ = 0;
 
         // Metrics evaluator - handles all evaluation logic
         std::unique_ptr<lfs::training::MetricsEvaluator> evaluator_;

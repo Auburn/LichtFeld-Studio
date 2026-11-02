@@ -48,7 +48,9 @@ namespace fast_lfs::optimizer::kernels::adam {
         const float* screen_share_max,
         const int screen_share_n,
         const float screen_share_limit,
-        const float screen_share_penalty) {
+        const float screen_share_penalty,
+        const int screen_share_axis,
+        const float screen_share_falloff) {
         using C = lfs::training::joint_adam::DeviceCodec<BITS>;
         constexpr float kInf = 1e30f;
         constexpr int kBS = lfs::training::joint_adam::kBlockSizeDevice;
@@ -86,6 +88,20 @@ namespace fast_lfs::optimizer::kernels::adam {
         const float step_size = row_lr * bias_correction1_rcp;
         const float beta1_comp = 1.0f - beta1;
         const float beta2_comp = 1.0f - beta2;
+        // --screen-share-axis area: the hinge leaves the shortest log-scale axis alone; weighted: it scales axis i by
+        // w_i = (s_i / s_max)^falloff (row read before the update).
+        int share_skip_axis = -1;
+        bool share_weighted = false;
+        float share_log_max = 0.0f;
+        if (in_range && lfs::training::screen_share_measures_area(screen_share_axis) && screen_share_max != nullptr &&
+            prim < screen_share_n && n_attr == 3) {
+            const float* const ls = param + static_cast<int64_t>(prim) * 3;
+            share_skip_axis = lfs::training::screen_share_unpushed_axis(screen_share_axis, ls[0], ls[1], ls[2]);
+            if (screen_share_axis == lfs::training::kScreenShareAxisWeighted) {
+                share_log_max = fmaxf(ls[0], fmaxf(ls[1], ls[2]));
+                share_weighted = true;
+            }
+        }
 
         if (in_range) {
             for (int i = 0; i < row; ++i) {
@@ -96,10 +112,13 @@ namespace fast_lfs::optimizer::kernels::adam {
                 if (apply_step) {
                     float grad = param_grad[static_cast<int64_t>(prim) * n_attr + i];
                     float hinge = 0.0f;
-                    if (screen_share_max != nullptr && prim < screen_share_n) {
+                    if (screen_share_max != nullptr && prim < screen_share_n && i != share_skip_axis) {
                         hinge = lfs::training::screen_share_hinge_extra_grad(
                             screen_share_max[prim], screen_share_limit, screen_share_penalty,
                             mv.y, bias_correction2_sqrt_rcp, eps);
+                        if (share_weighted)   // axis i is not updated yet: its pre-update log-scale
+                            hinge *= lfs::training::screen_share_axis_weight(
+                                screen_share_falloff, share_log_max, param[static_cast<int64_t>(prim) * n_attr + i]);
                     }
                     m = beta1 * mv.x + beta1_comp * (grad + hinge);
                     v = beta2 * mv.y + beta2_comp * grad * grad;
@@ -169,7 +188,9 @@ namespace fast_lfs::optimizer::kernels::adam {
         const float* screen_share_max,
         const int screen_share_n,
         const float screen_share_limit,
-        const float screen_share_penalty) {
+        const float screen_share_penalty,
+        const int screen_share_axis,
+        const float screen_share_falloff) {
         using C = lfs::training::joint_adam::DeviceCodec<BITS>;
         constexpr float kInf = 1e30f;
         constexpr int kBS = lfs::training::joint_adam::kBlockSizeDevice;
@@ -233,6 +254,20 @@ namespace fast_lfs::optimizer::kernels::adam {
         const float step_size = row_lr * bias_correction1_rcp;
         const float beta1_comp = 1.0f - beta1;
         const float beta2_comp = 1.0f - beta2;
+        // --screen-share-axis area: the hinge leaves the shortest log-scale axis alone; weighted: it scales axis i by
+        // w_i = (s_i / s_max)^falloff (row read before the update).
+        int share_skip_axis = -1;
+        bool share_weighted = false;
+        float share_log_max = 0.0f;
+        if (in_range && ent.apply_screen_share && lfs::training::screen_share_measures_area(screen_share_axis) &&
+            screen_share_max != nullptr && prim < screen_share_n && n_attr == 3) {
+            const float* const ls = param + static_cast<int64_t>(prim) * 3;
+            share_skip_axis = lfs::training::screen_share_unpushed_axis(screen_share_axis, ls[0], ls[1], ls[2]);
+            if (screen_share_axis == lfs::training::kScreenShareAxisWeighted) {
+                share_log_max = fmaxf(ls[0], fmaxf(ls[1], ls[2]));
+                share_weighted = true;
+            }
+        }
 
         if (in_range) {
             for (int i = 0; i < row; ++i) {
@@ -244,10 +279,13 @@ namespace fast_lfs::optimizer::kernels::adam {
                     float grad = param_grad[static_cast<int64_t>(prim) * n_attr + i];
                     float hinge = 0.0f;
                     if (ent.apply_screen_share && screen_share_max != nullptr &&
-                        prim < screen_share_n) {
+                        prim < screen_share_n && i != share_skip_axis) {
                         hinge = lfs::training::screen_share_hinge_extra_grad(
                             screen_share_max[prim], screen_share_limit, screen_share_penalty,
                             mv.y, bias_correction2_sqrt_rcp, eps);
+                        if (share_weighted)   // axis i is not updated yet: its pre-update log-scale
+                            hinge *= lfs::training::screen_share_axis_weight(
+                                screen_share_falloff, share_log_max, param[static_cast<int64_t>(prim) * n_attr + i]);
                     }
                     m = beta1 * mv.x + beta1_comp * (grad + hinge);
                     v = beta2 * mv.y + beta2_comp * grad * grad;

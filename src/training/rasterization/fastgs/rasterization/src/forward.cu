@@ -200,7 +200,13 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
     bool mip_filter,
     cudaStream_t stream,
     float* max_screen_share,
-    float dilation_scale) {
+    float dilation_scale,
+    const FastGSLens& lens,
+    const FastGSDistortion& distortion,
+    const int screen_share_axis) {
+
+    if (distortion.moments != nullptr && (distortion.depths == nullptr || distortion.grad_depths == nullptr))
+        throw std::runtime_error("FastGS depth distortion: the per-splat depths and grad_depths buffers must be bound with the moments");
 
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const uint64_t n_tiles_u64 = static_cast<uint64_t>(grid.x) * static_cast<uint64_t>(grid.y);
@@ -244,8 +250,12 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
                                  float4* color,
                                  float3* normals,
                                  const uint n_work_items,
-                                 float* screen_share) {
-        kernels::forward::preprocess_cu<<<div_round_up(n_work_items, static_cast<uint>(config::block_size_preprocess)), config::block_size_preprocess, 0, stream>>>(
+                                 float* screen_share,
+                                 const FastGSDistortion& preprocess_distortion) {
+        auto* const preprocess_kernel = lens.model == kLensFisheye
+                                            ? kernels::forward::preprocess_cu<true>
+                                            : kernels::forward::preprocess_cu<false>;
+        preprocess_kernel<<<div_round_up(n_work_items, static_cast<uint>(config::block_size_preprocess)), config::block_size_preprocess, 0, stream>>>(
             means,
             scales_raw,
             rotations_raw,
@@ -287,7 +297,10 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
             far_,
             mip_filter,
             dilation_scale,
-            screen_share);
+            screen_share,
+            lens,
+            preprocess_distortion,
+            screen_share_axis);
         LFS_CUDA_LAUNCH_CHECK(stream, "fastgs.forward.preprocess");
     };
 
@@ -300,7 +313,7 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
     launch_preprocess(nullptr,
                       visibility_buffers.visibility_mask,
                       nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-                      static_cast<uint>(n_primitives), max_screen_share);
+                      static_cast<uint>(n_primitives), max_screen_share, FastGSDistortion{});
     LFS_FASTGS_PHASE_CHECK("fastgs.forward.preprocess.visibility");
 
     const uint n_visibility_blocks = static_cast<uint>(
@@ -386,7 +399,8 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
                           per_primitive_buffers.conic_opacity,
                           per_primitive_buffers.color,
                           primitive_normals,
-                          static_cast<uint>(n_visible), nullptr);
+                          static_cast<uint>(n_visible), nullptr,
+                          distortion.moments != nullptr ? distortion : FastGSDistortion{});
         check_cuda_with_fastgs_status(cudaGetLastError(), "preprocess", forward_status, "preprocess", static_cast<uint64_t>(n_primitives), n_tiles_u64);
         sync_fastgs_phase_if_requested("preprocess", forward_status, "preprocess", static_cast<uint64_t>(n_primitives), n_tiles_u64);
     }
@@ -566,8 +580,8 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
     // Production: warp cull ON (mode 0), blend_batch_size from config (or test hook).
     const int warp_cull_mode = g_warp_cull_mode.load(std::memory_order_relaxed);
     const int blend_batch_override = g_blend_batch_size_override.load(std::memory_order_relaxed);
-    auto launch_blend = [&]<bool RENDER_NORMAL, bool RENDER_DEPTH>() {
-        kernels::forward::blend_cu<RENDER_NORMAL, RENDER_DEPTH><<<grid, dim3(config::block_size_blend_forward), 0, stream>>>(
+    auto launch_blend_variant = [&]<bool RENDER_NORMAL, bool RENDER_DEPTH, bool DISTORTION>() {
+        kernels::forward::blend_cu<RENDER_NORMAL, RENDER_DEPTH, DISTORTION><<<grid, dim3(config::block_size_blend_forward), 0, stream>>>(
             per_tile_buffers.instance_ranges,
             sorted_primitive_indices,
             visibility_buffers.primitive_work_indices,
@@ -588,8 +602,16 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
             height,
             grid.x,
             warp_cull_mode,
-            blend_batch_override);
+            blend_batch_override,
+            distortion);
         LFS_CUDA_LAUNCH_CHECK(stream, "fastgs.forward.blend");
+    };
+    // The distortion variant only when its buffers are bound; otherwise the unchanged kernels.
+    auto launch_blend = [&]<bool RENDER_NORMAL, bool RENDER_DEPTH>() {
+        if (distortion.moments != nullptr)
+            launch_blend_variant.template operator()<RENDER_NORMAL, RENDER_DEPTH, true>();
+        else
+            launch_blend_variant.template operator()<RENDER_NORMAL, RENDER_DEPTH, false>();
     };
     if (normal != nullptr) {
         if (depth != nullptr)

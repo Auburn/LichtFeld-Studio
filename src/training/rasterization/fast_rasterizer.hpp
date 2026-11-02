@@ -16,6 +16,26 @@
 #include <utility>
 
 namespace lfs::training {
+    // Depth distortion loss (2DGS / Mip-NeRF 360) for fast_rasterize_forward: weight * mean over the
+    // image pixels of sum_{i>j} w_i w_j (m_i - m_j)^2, m = far/(far - near) (1 - near/d). weight 0 = off
+    // (the unchanged kernels run). See fast_lfs::rasterization::FastGSDistortion.
+    //   depth_distance: d = distance from the camera centre (default); false = the sort depth (camera z on the
+    //     pinhole path: the pre-2026-11-01 behaviour, which rewards opaque splats beside the camera).
+    //   plane_sigma > 0: splats whose plane_sigma-sigma extent along the camera axis crosses the camera plane
+    //     are left out of the term for that view (0 = none).
+    //   min_dist > 0: splats whose distortion depth d is below min_dist are left out too (0 = none).
+    //   count_left_out: also count the visible splats left out (FastRasterizeContext::distortion_left_out:
+    //     [0] plane-crossing, [1] nearer than min_dist).
+    struct FastGSDistortionOptions {
+        float weight = 0.0f;
+        float near_n = 0.2f;
+        float far_n = 1000.0f;
+        bool depth_distance = true;
+        float plane_sigma = 2.0f;
+        float min_dist = 0.0f;
+        bool count_left_out = false;
+    };
+
     // Forward pass context - holds intermediate buffers needed for backward
     struct FastRasterizeContext {
         FastRasterizeContext() = default;
@@ -77,6 +97,16 @@ namespace lfs::training {
         // Background image for per-pixel blending (optional, empty = use bg_color)
         lfs::core::Tensor bg_image;
 
+        // Depth distortion (only when requested): per-pixel moments [3, H, W] the backward reads,
+        // the weighted loss [1] the forward accumulated, the per-splat distortion depths [N] and their
+        // gradient [N], and (with count_left_out) the number of visible splats left out [2]
+        // ([0] plane-crossing, [1] nearer than min_dist).
+        lfs::core::Tensor distortion_moments;
+        lfs::core::Tensor distortion_loss;
+        lfs::core::Tensor distortion_depths;
+        lfs::core::Tensor distortion_grad_depths;
+        lfs::core::Tensor distortion_left_out;
+
         void set_forward_context(fast_lfs::rasterization::ForwardContext ctx) noexcept {
             release_forward_context();
             forward_ctx = ctx;
@@ -129,6 +159,11 @@ namespace lfs::training {
             tile_width = std::exchange(other.tile_width, 0);
             tile_height = std::exchange(other.tile_height, 0);
             bg_image = std::move(other.bg_image);
+            distortion_moments = std::move(other.distortion_moments);
+            distortion_loss = std::move(other.distortion_loss);
+            distortion_depths = std::move(other.distortion_depths);
+            distortion_grad_depths = std::move(other.distortion_grad_depths);
+            distortion_left_out = std::move(other.distortion_left_out);
             owns_forward_context_ = std::exchange(other.owns_forward_context_, false);
         }
     };
@@ -142,11 +177,14 @@ namespace lfs::training {
         float sh_rest_reg_weight = 0.0f;
         float flatten_reg_weight = 0.0f;
         float opacity_reg_weight = 0.0f;
+        // weight * mean(o (1 - o)) over all splats; 0 = off.
+        float opacity_binarize_weight = 0.0f;
         float* rendered_count = nullptr;
         // Optional persistent device scalars (caller zeros each step). Accumulated in
         // preprocess_backward so loss-only reg kernels can be skipped on the FastGS path.
         float* scale_reg_loss_out = nullptr;
         float* opacity_reg_loss_out = nullptr;
+        float* opacity_binarize_loss_out = nullptr;
         float* erank_reg_loss_out = nullptr;
         float* sh_rest_reg_loss_out = nullptr;
         float* dc_reg_loss_out = nullptr;
@@ -161,6 +199,11 @@ namespace lfs::training {
 
     // Accumulates FP64 removal energy into aligned CUDA UInt8 [N, sizeof(double)] storage.
     // The caller zeros these bytes once; each call adds a view without clearing them.
+    // The projection fast_rasterize_forward uses for a camera: OPENCV_FISHEYE (and its RADIAL /
+    // SIMPLE_RADIAL variants) natively unless the camera was undistort-prepared, else pinhole.
+    // LFS_FISHEYE_MAX_DEG (default 88) sets how far off the axis splat centres are still drawn.
+    [[nodiscard]] fast_lfs::rasterization::FastGSLens fastgs_lens_for_camera(const lfs::core::Camera& camera);
+
     lfs::Status fast_accumulate_pop_scores(const FastRasterizeContext& ctx, lfs::core::Tensor& scores);
 
     [[nodiscard]] fast_lfs::rasterization::FusedAdamSettings make_fastgs_fused_adam_settings(
@@ -183,7 +226,12 @@ namespace lfs::training {
         bool render_normal = false,
         bool render_depth = true,
         float dilation_scale = 1.0f,
-        bool update_screen_share = true);
+        bool update_screen_share = true,
+        const FastGSDistortionOptions& distortion = {},
+        // Radius the collected screen share measures (lfs/training/screen_share.cuh): kScreenShareAxisMax (0,
+        // the longest axis) or kScreenShareAxisArea (1, area of the two longest). Must match the optimizer's
+        // hinge (publish_screen_share_cap); training callers pass screen_share_axis_code(params).
+        int screen_share_axis = 0);
 
     // Backward pass with optional extra alpha gradient for masked training
     void fast_rasterize_backward(

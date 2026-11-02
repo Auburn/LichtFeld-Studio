@@ -45,6 +45,11 @@ namespace fast_lfs::rasterization {
         int n_instances = 0;
         int n_visible = 0;
         int sh_layout_bases = 1;
+        // The projection the forward used; the backward differentiates the same one.
+        FastGSLens lens{};
+        // Depth distortion buffers bound by the forward (off unless moments != nullptr); the
+        // backward adds the same loss's gradients.
+        FastGSDistortion distortion{};
         uint64_t frame_id = 0;
         // The stream all of this context's kernels/allocations are ordered on;
         // releases (sorted indices, arena frame, helper buffers) must use it.
@@ -102,7 +107,10 @@ namespace fast_lfs::rasterization {
         unsigned int sh_value_n_cells = 0,
         unsigned int sh_value_bits = 0, // 0=fp32, 16=q16(+bounds) or IEEE f16
         float* max_screen_share_ptr = nullptr,
-        float dilation_scale = 1.0f);
+        float dilation_scale = 1.0f,
+        const FastGSLens& lens = {},               // pinhole unless lens.model == kLensFisheye
+        const FastGSDistortion& distortion = {},  // depth distortion loss; off unless distortion.moments != nullptr
+        int screen_share_axis = 0);               // radius max_screen_share_ptr measures: 0 longest axis, 1 area of the two longest
 
     void release_forward_context(const ForwardContext& forward_ctx);
 
@@ -157,6 +165,13 @@ namespace fast_lfs::rasterization {
 
     // Pre-compile all CUDA kernels to avoid JIT delays during rendering
     void warmup_kernels();
+
+    // Test hook: the fisheye projection maths of the preprocess kernels at n camera-space points.
+    // host_in: 9 floats per point (p, then dL/dJ rows G1 and G2); host_out: 17 floats per point
+    // (mean2d, J row 1, J row 2, the gradient of G1.J1 + G2.J2 in p through J, then h, h_q, h_z,
+    // h_qq, h_qz, h_zz).
+    void fisheye_projection_selftest(const FastGSLens& lens, float fx, float fy, float cx, float cy,
+                                     const float* host_in, int n, float* host_out);
 
     /// cudaPointerGetAttributes preflight call count (0 in Release/NDEBUG).
     [[nodiscard]] std::uint64_t preflight_pointer_attr_call_count() noexcept;

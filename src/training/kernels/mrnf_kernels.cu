@@ -346,6 +346,96 @@ namespace lfs::training::mrnf_strategy {
         LFS_CUDA_LAUNCH_CHECK(s, "training.mrnf.fold_densification_error_and_zero");
     }
 
+    __global__ void fold_densification_error_visits_and_zero_kernel(
+        float* __restrict__ refine_weight_max,
+        float* __restrict__ refine_weight_sum,
+        float* __restrict__ refine_weight_sq,
+        float* __restrict__ refine_visits,
+        float* __restrict__ densification_info,
+        size_t N) {
+
+        const size_t idx = threadIdx.x + blockIdx.x * static_cast<size_t>(blockDim.x);
+        if (idx >= N)
+            return;
+
+        const float e = densification_info[N + idx];
+        refine_weight_max[idx] = fmaxf(refine_weight_max[idx], e);
+        if (e > 0.0f) {
+            refine_weight_sum[idx] += e;
+            refine_weight_sq[idx] += e * e;
+            refine_visits[idx] += 1.0f;
+        }
+        densification_info[N + idx] = 0.0f;
+    }
+
+    void launch_fold_densification_error_visits_and_zero(
+        float* refine_weight_max,
+        float* refine_weight_sum,
+        float* refine_weight_sq,
+        float* refine_visits,
+        float* densification_info,
+        size_t N,
+        void* stream) {
+        if (N == 0)
+            return;
+        constexpr int threads = 256;
+        const int blocks = static_cast<int>((N + threads - 1) / threads);
+        cudaStream_t s = resolve_stream(stream);
+        fold_densification_error_visits_and_zero_kernel<<<blocks, threads, 0, s>>>(
+            refine_weight_max, refine_weight_sum, refine_weight_sq, refine_visits, densification_info, N);
+        LFS_CUDA_LAUNCH_CHECK(s, "training.mrnf.fold_densification_error_visits_and_zero");
+    }
+
+    __global__ void mean_per_visit_kernel(
+        const float* sum,
+        const float* __restrict__ visits,
+        float* out,
+        size_t N) {
+        const size_t idx = threadIdx.x + blockIdx.x * static_cast<size_t>(blockDim.x);
+        if (idx >= N)
+            return;
+        const float v = visits[idx];
+        out[idx] = v > 0.0f ? sum[idx] / v : 0.0f;
+    }
+
+    void launch_mean_per_visit(
+        const float* sum,
+        const float* visits,
+        float* out,
+        size_t N,
+        void* stream) {
+        if (N == 0)
+            return;
+        constexpr int threads = 256;
+        const int blocks = static_cast<int>((N + threads - 1) / threads);
+        cudaStream_t s = resolve_stream(stream);
+        mean_per_visit_kernel<<<blocks, threads, 0, s>>>(sum, visits, out, N);
+        LFS_CUDA_LAUNCH_CHECK(s, "training.mrnf.mean_per_visit");
+    }
+
+    __global__ void count_positive_kernel(
+        const float* __restrict__ values,
+        float* __restrict__ visits,
+        size_t N) {
+        const size_t idx = threadIdx.x + blockIdx.x * static_cast<size_t>(blockDim.x);
+        if (idx < N && values[idx] > 0.0f)
+            visits[idx] += 1.0f;
+    }
+
+    void launch_count_positive(
+        const float* values,
+        float* visits,
+        size_t N,
+        void* stream) {
+        if (N == 0)
+            return;
+        constexpr int threads = 256;
+        const int blocks = static_cast<int>((N + threads - 1) / threads);
+        cudaStream_t s = resolve_stream(stream);
+        count_positive_kernel<<<blocks, threads, 0, s>>>(values, visits, N);
+        LFS_CUDA_LAUNCH_CHECK(s, "training.mrnf.count_positive");
+    }
+
     __global__ void extract_axis_kernel(
         const float* __restrict__ means,
         float* __restrict__ output,

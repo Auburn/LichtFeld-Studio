@@ -10,6 +10,7 @@ set(FASTLFS_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/forward.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/backward.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/pop_scores.cu
+        ${CMAKE_CURRENT_SOURCE_DIR}/rasterization/src/fisheye_selftest.cu
         # optimizer
         ${CMAKE_CURRENT_SOURCE_DIR}/optimizer/src/adam_api.cu
         ${CMAKE_CURRENT_SOURCE_DIR}/optimizer/src/adam_shN_joint.cu

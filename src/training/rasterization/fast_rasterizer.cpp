@@ -21,7 +21,10 @@
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <cmath>
+#include <cstdlib>
 #include <limits>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 
@@ -56,6 +59,8 @@ namespace lfs::training {
             dst.screen_share_n = src.screen_share_n;
             dst.screen_share_limit = src.screen_share_limit;
             dst.screen_share_penalty = src.screen_share_penalty;
+            dst.screen_share_axis = src.screen_share_axis;
+            dst.screen_share_falloff = src.screen_share_falloff;
             return dst;
         };
         fused_adam.enabled = optimizer_fused.enabled;
@@ -71,8 +76,10 @@ namespace lfs::training {
         fused_adam.sh_rest_reg_weight = fused_extra_gradients.sh_rest_reg_weight;
         fused_adam.flatten_reg_weight = fused_extra_gradients.flatten_reg_weight;
         fused_adam.opacity_reg_weight = fused_extra_gradients.opacity_reg_weight;
+        fused_adam.opacity_binarize_weight = fused_extra_gradients.opacity_binarize_weight;
         fused_adam.scale_reg_loss_out = fused_extra_gradients.scale_reg_loss_out;
         fused_adam.opacity_reg_loss_out = fused_extra_gradients.opacity_reg_loss_out;
+        fused_adam.opacity_binarize_loss_out = fused_extra_gradients.opacity_binarize_loss_out;
         fused_adam.erank_reg_loss_out = fused_extra_gradients.erank_reg_loss_out;
         fused_adam.sh_rest_reg_loss_out = fused_extra_gradients.sh_rest_reg_loss_out;
         fused_adam.dc_reg_loss_out = fused_extra_gradients.dc_reg_loss_out;
@@ -93,6 +100,48 @@ namespace lfs::training {
                 optimizer_fused.mean_step_far_mask_n, optimizer_fused.means.n_primitives);
         }
         return fused_adam;
+    }
+
+    fast_lfs::rasterization::FastGSLens fastgs_lens_for_camera(const core::Camera& camera) {
+        using namespace fast_lfs::rasterization;
+        FastGSLens lens{};
+        // An undistort-prepared camera already carries the pinhole calibration it is trained in.
+        if (camera.camera_model_type() != core::CameraModelType::FISHEYE || camera.is_undistort_prepared())
+            return lens;
+        lens.model = kLensFisheye;
+        float k[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        if (const auto radial = camera.radial_distortion(); radial.is_valid() && radial.numel() > 0) {
+            const auto host = (radial.device() == core::Device::CPU ? radial : radial.cpu()).contiguous();
+            const auto host_f32 = host.dtype() == core::DataType::Float32 ? host : host.to(core::DataType::Float32);
+            const float* values = host_f32.ptr<float>();
+            for (size_t i = 0; i < std::min<size_t>(4, host_f32.numel()); ++i)
+                k[i] = values[i];
+        }
+        lens.k1 = k[0];
+        lens.k2 = k[1];
+        lens.k3 = k[2];
+        lens.k4 = k[3];
+
+        // Splat centres up to theta_max off the axis are drawn (default 88 degrees: the game draws
+        // everything in front of the camera; z > 0 is the hard limit of the projection). The lens
+        // polynomial must stay monotonic up to it, so stop short of its first turning point.
+        double theta_max = 88.0 * std::numbers::pi / 180.0;
+        if (const char* env = std::getenv("LFS_FISHEYE_MAX_DEG"); env != nullptr && *env) {
+            const double deg = std::atof(env);
+            if (deg > 1.0 && deg < 89.9)
+                theta_max = deg * std::numbers::pi / 180.0;
+        }
+        for (double t = 0.0; t <= theta_max; t += 5e-4) {
+            const double t2 = t * t;
+            const double slope = 1.0 + t2 * (3.0 * k[0] + t2 * (5.0 * k[1] + t2 * (7.0 * k[2] + t2 * 9.0 * k[3])));
+            if (slope <= 0.0) {
+                theta_max = 0.98 * t;
+                break;
+            }
+        }
+        const double tan_max = std::tan(theta_max);
+        lens.max_w = static_cast<float>(tan_max * tan_max);
+        return lens;
     }
 
     namespace {
@@ -363,7 +412,9 @@ namespace lfs::training {
         bool render_normal,
         bool render_depth,
         float dilation_scale,
-        bool update_screen_share) {
+        bool update_screen_share,
+        const FastGSDistortionOptions& distortion_options,
+        int screen_share_axis) {
         // Get camera parameters
         const int full_width = viewpoint_camera.image_width();
         const int full_height = viewpoint_camera.image_height();
@@ -458,6 +509,50 @@ namespace lfs::training {
                 normal.set_stream(raster_stream);
         }
 
+        // Depth distortion buffers, only when requested (otherwise the unchanged kernels run).
+        core::Tensor distortion_moments;
+        core::Tensor distortion_loss;
+        core::Tensor distortion_depths;
+        core::Tensor distortion_grad_depths;
+        core::Tensor distortion_left_out;
+        fast_lfs::rasterization::FastGSDistortion distortion;
+        if (distortion_options.weight > 0.0f) {
+            distortion_moments = core::Tensor::empty_exact({3, static_cast<size_t>(height), static_cast<size_t>(width)});
+            if (distortion_moments.stream() != raster_stream)
+                distortion_moments.set_stream(raster_stream);
+            distortion_loss = core::Tensor::zeros({1}, core::Device::CUDA);
+            if (distortion_loss.stream() != raster_stream)
+                distortion_loss.set_stream(raster_stream);
+            // per model splat: the distortion depth (written by the preprocess for the visible ones) and its gradient
+            distortion_depths = core::Tensor::empty_exact({static_cast<size_t>(n_primitives)});
+            if (distortion_depths.stream() != raster_stream)
+                distortion_depths.set_stream(raster_stream);
+            distortion_grad_depths = core::Tensor::zeros({static_cast<size_t>(n_primitives)}, core::Device::CUDA);
+            if (distortion_grad_depths.stream() != raster_stream)
+                distortion_grad_depths.set_stream(raster_stream);
+            if (distortion_options.count_left_out) {
+                distortion_left_out = core::Tensor::zeros({2}, core::Device::CUDA); // [0] plane-crossing, [1] nearer than min_dist
+                if (distortion_left_out.stream() != raster_stream)
+                    distortion_left_out.set_stream(raster_stream);
+            }
+            // mean over the full image, so tiles add up to the same loss
+            const float n_pixels = static_cast<float>(full_width) * static_cast<float>(full_height);
+            distortion.moments = distortion_moments.ptr<float>();
+            distortion.loss_out = distortion_loss.ptr<float>();
+            distortion.depths = distortion_depths.ptr<float>();
+            distortion.grad_depths = distortion_grad_depths.ptr<float>();
+            distortion.n_left_out = distortion_options.count_left_out ? distortion_left_out.ptr<float>() : nullptr;
+            distortion.loss_scale = distortion_options.weight / n_pixels;
+            distortion.grad_scale = distortion.loss_scale;
+            distortion.near_n = distortion_options.near_n;
+            distortion.far_n = distortion_options.far_n;
+            distortion.depth_mode = distortion_options.depth_distance
+                                        ? fast_lfs::rasterization::kDistortionDepthDistance
+                                        : fast_lfs::rasterization::kDistortionDepthZ;
+            distortion.plane_sigma = std::max(distortion_options.plane_sigma, 0.0f);
+            distortion.min_dist = std::max(distortion_options.min_dist, 0.0f);
+        }
+
         // Call forward_raw with raw pointers (no PyTorch wrappers)
         // Use adjusted cx/cy for tile rendering
         fast_lfs::rasterization::ForwardContext forward_ctx;
@@ -525,7 +620,10 @@ namespace lfs::training {
                  gaussian_model._max_screen_share.numel() >= static_cast<size_t>(n_primitives))
                     ? gaussian_model._max_screen_share.ptr<float>()
                     : nullptr,
-                dilation_scale);
+                dilation_scale,
+                fastgs_lens_for_camera(viewpoint_camera),
+                distortion,
+                screen_share_axis);
         } catch (const std::exception& e) {
             // Dump all input data for debugging
             dump_crash_data(
@@ -662,6 +760,11 @@ namespace lfs::training {
         ctx.tile_y_offset = tile_y_offset;
         ctx.tile_width = tile_width;
         ctx.tile_height = tile_height;
+        ctx.distortion_moments = std::move(distortion_moments);
+        ctx.distortion_loss = std::move(distortion_loss);
+        ctx.distortion_depths = std::move(distortion_depths);
+        ctx.distortion_grad_depths = std::move(distortion_grad_depths);
+        ctx.distortion_left_out = std::move(distortion_left_out);
 
         return std::pair{std::move(render_output), std::move(ctx)};
     }

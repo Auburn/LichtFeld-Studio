@@ -202,4 +202,61 @@ namespace lfs::training::kernels {
         LFS_CUDA_LAUNCH_CHECK(stream, "training.regularization.opacity_reduce");
     }
 
+    // =============================================================================
+    // OPACITY BINARIZATION: weight * mean(o * (1 - o)), o = sigmoid(raw)
+    // =============================================================================
+
+    __global__ void fused_opacity_binarize_kernel(
+        const float* __restrict__ params,
+        float* __restrict__ param_grads,
+        float* __restrict__ partial_sums,
+        size_t n,
+        float grad_scale) { // weight / n
+
+        float local_sum = 0.0f;
+        for (size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+             idx < n;
+             idx += blockDim.x * gridDim.x) {
+            const float o = 1.0f / (1.0f + expf(-params[idx]));
+            const float o1o = o * (1.0f - o);
+            local_sum += o1o;
+            if (param_grads != nullptr) {
+                // d/dx [o (1 - o)] = (1 - 2 o) * o (1 - o)
+                atomicAdd(&param_grads[idx], grad_scale * (1.0f - 2.0f * o) * o1o);
+            }
+        }
+        local_sum = lfs::core::warp_ops::block_reduce_sum(local_sum);
+        if (threadIdx.x == 0) {
+            partial_sums[blockIdx.x] = local_sum;
+        }
+    }
+
+    void launch_fused_opacity_binarize(
+        const float* params,
+        float* param_grads,
+        float* loss_out,
+        float* temp_buffer,
+        size_t n,
+        float weight,
+        cudaStream_t stream) {
+        stream = resolve_stream(stream);
+
+        if (n == 0 || weight == 0.0f) {
+            return;
+        }
+
+        const int block_size = 256;
+        const int num_blocks = std::min((n + block_size - 1) / block_size, size_t(1024));
+        const float grad_scale = weight / static_cast<float>(n);
+
+        fused_opacity_binarize_kernel<<<num_blocks, block_size, 0, stream>>>(
+            params, param_grads, temp_buffer, n, grad_scale);
+        LFS_CUDA_LAUNCH_CHECK(stream, "training.regularization.opacity_binarize");
+
+        // Same final reduction as the opacity regularizer: weight * (sum / n)
+        final_opacity_reduce_kernel<<<1, block_size, 0, stream>>>(
+            temp_buffer, loss_out, num_blocks, weight, n);
+        LFS_CUDA_LAUNCH_CHECK(stream, "training.regularization.opacity_binarize_reduce");
+    }
+
 } // namespace lfs::training::kernels

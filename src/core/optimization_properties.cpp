@@ -171,6 +171,117 @@ namespace lfs::core::param {
             .precision(4)
             .ui_step(0.001)
             .all_strategies()
+            .float_prop(&OptimizationParameters::opacity_binarize_weight,
+                        "opacity_binarize_weight", "Opacity Binarize", d.opacity_binarize_weight, 0.0f, 1.0f,
+                        "Weight of the loss mean(o (1 - o)) over all splats, which pushes every opacity toward 0 or 1; 0 turns it off")
+            .precision(4)
+            .ui_step(0.001)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .size_prop(&OptimizationParameters::opacity_binarize_start,
+                       "opacity_binarize_start", "Opacity Binarize Start", d.opacity_binarize_start, 0, 1000000,
+                       "Iteration from which the opacity binarization loss is active")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::distortion_weight,
+                        "distortion_weight", "Depth Distortion", d.distortion_weight, 0.0f, 100000.0f,
+                        "Weight of the per-pixel depth distortion loss (2DGS), which pulls the splats seen through a pixel onto one depth; standard rasterizer only, 0 turns it off")
+            .precision(2)
+            .ui_step(10.0)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .size_prop(&OptimizationParameters::distortion_start,
+                       "distortion_start", "Depth Distortion Start", d.distortion_start, 0, 1000000,
+                       "Iteration from which the depth distortion loss is active")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::distortion_near,
+                        "distortion_near", "Depth Distortion Near", d.distortion_near, 0.001f, 100.0f,
+                        "Near depth of the distortion loss depth mapping m = far/(far - near) (1 - near/d)")
+            .precision(3)
+            .ui_step(0.05)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::distortion_far,
+                        "distortion_far", "Depth Distortion Far", d.distortion_far, 1.0f, 1000000.0f,
+                        "Far depth of the distortion loss depth mapping")
+            .precision(1)
+            .ui_step(10.0)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .string_prop(&OptimizationParameters::distortion_depth,
+                         "distortion_depth", "Depth Distortion Depth", d.distortion_depth,
+                         "Depth used by the distortion loss: distance (from the camera centre, default) or z (camera z on the pinhole path, the old behaviour, which rewards opaque splats beside the camera)")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::distortion_skip_plane_crossing,
+                        "distortion_skip_plane_crossing", "Depth Distortion Plane Skip", d.distortion_skip_plane_crossing, 0.0f, 10.0f,
+                        "Leaves out of the distortion loss, per view, splats whose k-sigma extent along the camera axis crosses the camera plane (k = this value; 0 = none)")
+            .precision(2)
+            .ui_step(0.5)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::distortion_min_dist,
+                        "distortion_min_dist", "Depth Distortion Min Distance", d.distortion_min_dist, 0.0f, 100.0f,
+                        "Leaves out of the distortion loss, per view, splats nearer to the camera than this (scene units; 0 = none). Stops very close objects (whose edges dominate the loss) from being widened into opaque walls")
+            .precision(2)
+            .ui_step(0.25)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .string_prop(&OptimizationParameters::generated_prefix,
+                         "generated_prefix", "Generated View Prefix", d.generated_prefix,
+                         "Training images whose file name starts with this prefix are generated views: they use the alignment-tolerant low-pass + texture loss instead of L1 + SSIM; empty turns it off")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::generated_lowpass_sigma,
+                        "generated_lowpass_sigma", "Generated Low-pass Sigma", d.generated_lowpass_sigma, 0.0f, 10.0f,
+                        "Generated views: standard deviation in pixels of the Gaussian blur before the low-pass L1 (0 = no blur)")
+            .precision(2)
+            .ui_step(0.25)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .int_prop(&OptimizationParameters::generated_texture_radius,
+                      "generated_texture_radius", "Generated Texture Radius", d.generated_texture_radius, 1, 32,
+                      "Generated views: radius in pixels of the box window of the local luma standard deviation")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::generated_lowpass_weight,
+                        "generated_lowpass_weight", "Generated Low-pass Weight", d.generated_lowpass_weight, 0.0f, 100.0f,
+                        "Generated views: weight of the L1 between the blurred render and blurred target")
+            .precision(3)
+            .ui_step(0.1)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::generated_texture_weight,
+                        "generated_texture_weight", "Generated Texture Weight", d.generated_texture_weight, 0.0f, 100.0f,
+                        "Generated views: weight of the mean absolute difference of the local luma standard deviations")
+            .precision(3)
+            .ui_step(0.1)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::generated_pixel_weight,
+                        "generated_pixel_weight", "Generated Pixel Weight", d.generated_pixel_weight, 0.0f, 100.0f,
+                        "Generated views: weight of the plain per-pixel L1")
+            .precision(3)
+            .ui_step(0.05)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::generated_loss_weight,
+                        "generated_loss_weight", "Generated Loss Weight", d.generated_loss_weight, 0.0f, 100.0f,
+                        "Generated views: scale of the whole generated-view loss relative to a photo's photometric loss")
+            .precision(3)
+            .ui_step(0.1)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .string_prop(&OptimizationParameters::loss_weight_dir,
+                         "loss_weight_dir", "Loss Weight Folder", d.loss_weight_dir,
+                         "Folder of per-pixel photometric loss weight maps, <image name>.png per training image (16-bit PNG, weight = value / 10000, or float EXR/TIFF); they multiply the per-pixel L1 + SSIM and the densification error map; a missing map is weight 1; empty turns it off")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .float_prop(&OptimizationParameters::scale_reg,
                         "scale_reg", "Scale Reg", d.scale_reg, 0.0f, 1.0f,
                         "Scale regularization weight")
@@ -587,6 +698,18 @@ namespace lfs::core::param {
             .flags(PROP_ADVANCED)
             .strategies({"mrnf"})
             .all_strategies()
+            .bool_prop(&OptimizationParameters::growth_visit_normalize,
+                       "growth_visit_normalize", "Visit-normalized Growth", d.growth_visit_normalize,
+                       "Ranks growth candidates by their mean error signal per visit (steps of the refine window that gave them densification signal) instead of the window maximum, so rarely seen splats compete on equal terms (MRNF)")
+            .flags(PROP_ADVANCED)
+            .strategies({"mrnf"})
+            .all_strategies()
+            .string_prop(&OptimizationParameters::growth_visit_stat,
+                         "growth_visit_stat", "Visit-normalized Growth Statistic", d.growth_visit_stat,
+                         "Statistic of visit-normalized growth: mean (sum of the per-visit signals / visits) or weighted (sum of their squares / their sum, led by the closest views) (MRNF)")
+            .flags(PROP_ADVANCED)
+            .strategies({"mrnf"})
+            .all_strategies()
             .float_prop(&OptimizationParameters::opacity_decay,
                         "opacity_decay", "Opacity Decay", d.opacity_decay, 0.0f, 0.1f,
                         "Opacity decay rate per refine (MRNF)")
@@ -661,6 +784,18 @@ namespace lfs::core::param {
             .tooltip("training.tooltip.screen_share_penalty")
             .precision(2)
             .ui_step(0.1)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .string_prop(&OptimizationParameters::screen_share_axis,
+                         "screen_share_axis", "Screen Share Axis", d.screen_share_axis,
+                         "Splat radius the screen-share cap measures: max (its longest axis, default) or area (the area-equivalent radius of its two longest axes, so long thin splats such as straps and ropes are not shrunk; the shortest axis is never pushed) or weighted (measured as area; every axis is pushed by (s_i / s_max)^falloff, so the longest axis takes the push and a strap keeps its width). Standard rasterizer only")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::screen_share_falloff,
+                        "screen_share_falloff", "Screen Share Falloff", d.screen_share_falloff, 0.0f, 100.0f,
+                        "Screen share axis weighted: axis i is pushed by (s_i / s_max)^K of the step; 0 = all axes equally, large = the longest axis only")
+            .precision(2)
+            .ui_step(0.25)
             .flags(PROP_ADVANCED)
             .all_strategies()
             .bool_prop(&OptimizationParameters::use_edge_map,

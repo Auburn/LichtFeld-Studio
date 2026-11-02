@@ -368,6 +368,22 @@ namespace fast_lfs::rasterization::kernels {
         float us_u[MAX_FUSED_ADAM_ATTRIBUTES];
         float us_s[MAX_FUSED_ADAM_ATTRIBUTES];
 
+        // --screen-share-axis area: the hinge leaves the shortest log-scale axis alone; weighted: it scales axis i by
+        // w_i = (s_i / s_max)^falloff (row read before the update).
+        int share_skip_axis = -1;
+        bool share_weighted = false;
+        float share_log_max = 0.0f;
+        if (touch && apply_step && lfs::training::screen_share_measures_area(param.screen_share_axis) &&
+            param.screen_share_max != nullptr && primitive_idx < static_cast<uint>(param.screen_share_n) &&
+            n_attr == 3u && row == 3u) {
+            const float* const ls = param.param + base;
+            share_skip_axis = lfs::training::screen_share_unpushed_axis(param.screen_share_axis, ls[0], ls[1], ls[2]);
+            if (param.screen_share_axis == lfs::training::kScreenShareAxisWeighted) {
+                share_log_max = fmaxf(ls[0], fmaxf(ls[1], ls[2]));
+                share_weighted = true;
+            }
+        }
+
         if (touch) {
             for (uint i = 0; i < row; ++i) {
                 // Packed layout: [N, n_attr * bytes_per_cell] — cell = base+i
@@ -379,7 +395,8 @@ namespace fast_lfs::rasterization::kernels {
                     float grad = (i < active) ? grads[i] : 0.0f;
                     float hinge = 0.0f;
                     if (i < active && param.screen_share_max != nullptr &&
-                        primitive_idx < static_cast<uint>(param.screen_share_n)) {
+                        primitive_idx < static_cast<uint>(param.screen_share_n) &&
+                        static_cast<int>(i) != share_skip_axis) {
                         hinge = lfs::training::screen_share_hinge_extra_grad(
                             param.screen_share_max[primitive_idx],
                             param.screen_share_limit,
@@ -387,6 +404,9 @@ namespace fast_lfs::rasterization::kernels {
                             mv.y,
                             param.bias_correction2_sqrt_rcp,
                             eps);
+                        if (share_weighted)   // axis i is not updated yet: its pre-update log-scale
+                            hinge *= lfs::training::screen_share_axis_weight(
+                                param.screen_share_falloff, share_log_max, param.param[base + i]);
                     }
                     m = beta1 * mv.x + (1.0f - beta1) * (grad + hinge);
                     v = beta2 * mv.y + (1.0f - beta2) * grad * grad;
@@ -475,6 +495,23 @@ namespace fast_lfs::rasterization::kernels {
         return 1.0f / (1.0f + expf(-x));
     }
 
+    // Distortion-loss depth: m = far/(far - near) * (1 - near/d) for d in (near, far), 0 below, 1 above;
+    // dm_dd is its derivative (0 outside the range).
+    __device__ __forceinline__ float distortion_depth(const float d, const float near_n, const float far_n, float& dm_dd) {
+        if (!(d > near_n)) {
+            dm_dd = 0.0f;
+            return 0.0f;
+        }
+        if (!(d < far_n)) {
+            dm_dd = 0.0f;
+            return 1.0f;
+        }
+        const float k = far_n / (far_n - near_n);
+        const float inv_d = 1.0f / d;
+        dm_dd = k * near_n * inv_d * inv_d;
+        return k * (1.0f - near_n * inv_d);
+    }
+
     template <bool RUNTIME_LOG_SCALE = true>
     __device__ inline float scale_regularization_grad(
         const FusedAdamSettings& fused_adam,
@@ -523,6 +560,12 @@ namespace fast_lfs::rasterization::kernels {
         if (fused_adam.opacity_reg_weight > 0.0f && param.n_elements > 0) {
             const float opa = sigmoid(param.param[element_idx]);
             grad += fused_adam.opacity_reg_weight * opa * (1.0f - opa) /
+                    static_cast<float>(param.n_elements);
+        }
+        // L = w * mean(o (1 - o)): dL/draw = w / N * (1 - 2 o) * o (1 - o)
+        if (fused_adam.opacity_binarize_weight > 0.0f && param.n_elements > 0) {
+            const float opa = sigmoid(param.param[element_idx]);
+            grad += fused_adam.opacity_binarize_weight * (1.0f - 2.0f * opa) * opa * (1.0f - opa) /
                     static_cast<float>(param.n_elements);
         }
         return grad;

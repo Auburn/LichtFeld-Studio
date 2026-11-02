@@ -61,6 +61,7 @@
 #include <format>
 #include <future>
 #include <mutex>
+#include <numbers>
 #include <print>
 #include <rasterization_api.h>
 #include <string>
@@ -1364,16 +1365,23 @@ namespace lfs::app {
                 auto T = core::Tensor::from_vector(
                     std::vector<float>{t_w2c.x, t_w2c.y, t_w2c.z}, {3}, core::Device::CPU);
 
-                const auto [focal_x, focal_y] = rendering::computePixelFocalLengths(
+                auto [focal_x, focal_y] = rendering::computePixelFocalLengths(
                     {cfg.width, cfg.height}, cam_state.focal_length_mm);
+                // --render-fisheye: the equidistant lens (fpv-render's lens strength 1), centred,
+                // f = half the width over half the horizontal field of view in radians
+                const bool fisheye = cfg.fisheye_hfov_deg > 0.0f;
+                if (fisheye) {
+                    focal_x = focal_y = 0.5f * static_cast<float>(cfg.width) /
+                                        (0.5f * cfg.fisheye_hfov_deg * static_cast<float>(std::numbers::pi) / 180.0f);
+                }
 
                 core::Camera camera(
                     R, T,
                     focal_x, focal_y,
                     static_cast<float>(cfg.width) * 0.5f, static_cast<float>(cfg.height) * 0.5f,
+                    fisheye ? core::Tensor::zeros({4}, core::Device::CPU) : core::Tensor::empty({0}, core::Device::CPU),
                     core::Tensor::empty({0}, core::Device::CPU),
-                    core::Tensor::empty({0}, core::Device::CPU),
-                    core::CameraModelType::PINHOLE,
+                    fisheye ? core::CameraModelType::FISHEYE : core::CameraModelType::PINHOLE,
                     std::format("frame_{:06d}", frame),
                     {}, {},
                     cfg.width, cfg.height,

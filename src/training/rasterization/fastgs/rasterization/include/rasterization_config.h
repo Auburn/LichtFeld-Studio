@@ -23,6 +23,69 @@ namespace fast_lfs::rasterization {
         const float* bg_image = nullptr;
         const float* grad_alpha_extra = nullptr;
     };
+
+    // The camera projection the preprocess kernels apply to splat centres and covariances.
+    //   kLensPinhole: the rasterizer's own pinhole projection (u = fx x / z + cx).
+    //   kLensFisheye: COLMAP's OPENCV_FISHEYE. With rho = |(x, y)| and theta = atan2(rho, z),
+    //     theta_d = theta (1 + k1 theta^2 + k2 theta^4 + k3 theta^6 + k4 theta^8),
+    //     u = fx theta_d x / rho + cx, v = fy theta_d y / rho + cy (k = 0: the equidistant lens).
+    //     The 2D covariance is J W Sigma W^T J^T with J the analytic Jacobian of (u, v) at the
+    //     centre; depth (sort key, depth map) is the distance from the camera, not z.
+    //     Centres more than theta_max off the axis (rho^2 > max_w z^2, max_w = tan^2 theta_max),
+    //     or behind the camera, are culled.
+    // Pixel centres sit at integer + 0.5 for both, as in COLMAP.
+    enum : int { kLensPinhole = 0,
+                 kLensFisheye = 1 };
+    struct FastGSLens {
+        int model = kLensPinhole;
+        float k1 = 0.0f;
+        float k2 = 0.0f;
+        float k3 = 0.0f;
+        float k4 = 0.0f;
+        float max_w = 0.0f;
+    };
+
+    // Depth distortion loss (2DGS / Mip-NeRF 360) folded into the blend kernels. Per pixel
+    //   D = sum_i sum_{j<i} w_i w_j (m_i - m_j)^2
+    // over the splats that take part in the term, with w the blending weights front to back (alpha_i T_i;
+    // T includes every splat, taking part or not) and m the splat's distortion depth d mapped to [0, 1]
+    // by m = far/(far - near) * (1 - near/d), d clamped to [near, far].
+    // The distortion depth is its own per-splat value (depths[], written by the preprocess), used ONLY by
+    // this term; sorting and the depth output keep the rasterizer's depth (camera z for pinhole, distance
+    // for fisheye):
+    //   depth_mode kDistortionDepthDistance: the distance from the camera centre |p_cam| (pinhole and fisheye).
+    //   depth_mode kDistortionDepthZ: the sort depth (camera z for pinhole, distance for fisheye); the
+    //     behaviour before 2026-11-01, kept for comparison. Splats beside a pinhole camera have tiny z
+    //     whatever their distance, so they map to m ~ 0 and the term rewards opaque near-plane "blobs".
+    // plane_sigma > 0 leaves out of the term (for that view) every splat whose plane_sigma-sigma extent
+    // along the camera axis crosses the camera plane: z - plane_sigma * sigma_z < 0, sigma_z^2 = a^T Sigma a
+    // with a the camera axis (stored as depths[] = -1). They still occlude (their alpha is in T).
+    // min_dist > 0 also leaves out (the same way) every splat whose distortion depth d is below min_dist
+    // (2026-11-01, round 2). With near = 0.2 the mapping is so steep below ~1 unit that the edges of a very
+    // close object against the background (|m_i - m_j| ~ 0.3-1) outweigh everything else in the term, and
+    // the cheapest optimum turns the object's blurry multi-view fringe into a wide opaque wall; below near,
+    // m is clamped at 0 and the term cannot even push such splats back. Leaving them out keeps the term for
+    // the floor and floaters further away (d >= min_dist).
+    // The forward keeps A = sum w, M1 = sum w m and M2 = sum w m^2 per pixel over the splats taking part
+    // and adds w_i (m_i^2 A + M2 - 2 m_i M1) for every new one (A, M1, M2 in front of it).
+    // moments == nullptr turns it off; the default kernels are then used unchanged.
+    enum : int { kDistortionDepthZ = 0,
+                 kDistortionDepthDistance = 1 };
+    struct FastGSDistortion {
+        float* moments = nullptr;            // [3*H*W]: M1, M2, then A per pixel; forward writes, backward reads
+        float* loss_out = nullptr;           // [1]: forward adds loss_scale * sum over pixels of D (caller zeros); may be null
+        const float* pixel_weight = nullptr; // [H*W] optional per-pixel factor on D (null = 1)
+        float* depths = nullptr;             // [N] per model splat: distortion depth (< 0 = left out); preprocess writes. Required with moments.
+        float* grad_depths = nullptr;        // [N] per model splat: dL/d(distortion depth); blend backward adds (caller zeros). Required with moments.
+        float* n_left_out = nullptr;         // [2] optional: preprocess adds 1 per visible splat left out: [0] plane-crossing, [1] nearer than min_dist (and not plane-crossing) (caller zeros)
+        float loss_scale = 0.0f;             // forward: loss weight / number of pixels
+        float grad_scale = 0.0f;             // backward: dL/dD of every pixel (loss weight / number of pixels)
+        float near_n = 0.2f;
+        float far_n = 1000.0f;
+        int depth_mode = kDistortionDepthDistance;
+        float plane_sigma = 2.0f; // 0 = no splat is left out
+        float min_dist = 0.0f;    // splats with distortion depth < min_dist are left out; 0 = none
+    };
 } // namespace fast_lfs::rasterization
 
 namespace fast_lfs::rasterization::config {

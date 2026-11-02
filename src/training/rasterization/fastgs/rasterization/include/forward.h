@@ -5,6 +5,7 @@
 #pragma once
 
 #include "helper_math.h"
+#include "rasterization_config.h"
 #include <cstddef>
 #include <cstdint>
 #include <cuda_runtime.h>
@@ -93,6 +94,9 @@ namespace fast_lfs::rasterization {
         bool mip_filter,
         cudaStream_t stream,
         float* max_screen_share = nullptr,
-        float dilation_scale = 1.0f);
+        float dilation_scale = 1.0f,
+        const FastGSLens& lens = {},
+        const FastGSDistortion& distortion = {},
+        int screen_share_axis = 0); // radius max_screen_share measures: 0 longest axis, 1 area of the two longest (lfs/training/screen_share.cuh)
 
 } // namespace fast_lfs::rasterization

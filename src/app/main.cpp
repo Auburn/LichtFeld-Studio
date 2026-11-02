@@ -34,6 +34,17 @@
 #include <malloc.h>
 #endif
 
+namespace lfs::app {
+    // Developer checks of the standard rasterizer's native fisheye projection (lfe_fisheye_tool.cpp).
+    int run_lfe_fisheye_tool(int argc, const char* const* argv);
+    // Developer checks of the depth distortion loss (lfe_fisheye_tool.cpp).
+    int run_lfe_distortion_tool(int argc, const char* const* argv);
+    // Developer check of the generated-view loss (lfe_genloss_tool.cpp).
+    int run_lfe_genloss_tool(int argc, const char* const* argv);
+    // Developer check of the per-pixel loss weights (lfe_lossweight_tool.cpp).
+    int run_lfe_lossweight_tool(int argc, const char* const* argv);
+} // namespace lfs::app
+
 namespace {
     // Apply CUDA driver-level VRAM-reduction knobs BEFORE the primary context exists.
     // Setting these after cudaFree(nullptr) is too late — the driver has already
@@ -232,6 +243,15 @@ int main(int argc, char* argv[]) {
     lfs::core::install_crash_handlers();
     lfs::core::record_session_start();
     lfs::core::initialize_cuda_diagnostics();
+
+    if (argc >= 2 && std::string(argv[1]) == "lfe-fisheye")
+        return lfs::app::run_lfe_fisheye_tool(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "lfe-distortion")
+        return lfs::app::run_lfe_distortion_tool(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "lfe-genloss")
+        return lfs::app::run_lfe_genloss_tool(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "lfe-lossweight")
+        return lfs::app::run_lfe_lossweight_tool(argc, argv);
 
     auto result = lfs::core::args::parse_args(argc, argv);
     if (!result) {

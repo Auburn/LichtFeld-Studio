@@ -37,7 +37,9 @@ namespace fast_lfs::optimizer {
         const float* screen_share_max,
         const int screen_share_n,
         const float screen_share_limit,
-        const float screen_share_penalty) {
+        const float screen_share_penalty,
+        const int screen_share_axis,
+        const float screen_share_falloff) {
         LFS_VALIDATE_CUDA_DEVICE_POINTER(param, "param");
         LFS_VALIDATE_CUDA_DEVICE_POINTER(packed, "joint_packed");
         LFS_VALIDATE_CUDA_DEVICE_POINTER(bounds, "joint_bounds");
@@ -57,7 +59,8 @@ namespace fast_lfs::optimizer {
                 crop_damping_mask, crop_damping_mask_size, cropbox_lr_scale,
                 n_prims, n_attr, lr, beta1, beta2, eps,
                 bias_correction1_rcp, bias_correction2_sqrt_rcp,
-                screen_share_max, screen_share_n, screen_share_limit, screen_share_penalty);
+                screen_share_max, screen_share_n, screen_share_limit, screen_share_penalty,
+                screen_share_axis, screen_share_falloff);
         } else if (bits == 8) {
             kernels::adam::adam_step_joint_contiguous_cu<8><<<n_blocks, kBS, 0, stream>>>(
                 param, packed, bounds, param_grad,
@@ -65,7 +68,8 @@ namespace fast_lfs::optimizer {
                 crop_damping_mask, crop_damping_mask_size, cropbox_lr_scale,
                 n_prims, n_attr, lr, beta1, beta2, eps,
                 bias_correction1_rcp, bias_correction2_sqrt_rcp,
-                screen_share_max, screen_share_n, screen_share_limit, screen_share_penalty);
+                screen_share_max, screen_share_n, screen_share_limit, screen_share_penalty,
+                screen_share_axis, screen_share_falloff);
         } else {
             throw std::runtime_error("adam_step_joint_contiguous: bits must be 8 or 16");
         }
@@ -93,7 +97,9 @@ namespace fast_lfs::optimizer {
         const float* screen_share_max,
         const int screen_share_n,
         const float screen_share_limit,
-        const float screen_share_penalty) {
+        const float screen_share_penalty,
+        const int screen_share_axis,
+        const float screen_share_falloff) {
         if (n_entries <= 0) {
             return;
         }
@@ -136,7 +142,8 @@ namespace fast_lfs::optimizer {
                     beta1, beta2, eps,
                     mean_step_scale_raw, mean_step_scale_n, mean_step_median_extent,
                     mean_step_far_mask, mean_step_far_mask_n,
-                    screen_share_max, screen_share_n, screen_share_limit, screen_share_penalty);
+                    screen_share_max, screen_share_n, screen_share_limit, screen_share_penalty,
+                    screen_share_axis, screen_share_falloff);
             LFS_CUDA_LAUNCH_CHECK(stream, "adam_step_joint_contiguous_batched");
         };
         if (mean_step_enabled)

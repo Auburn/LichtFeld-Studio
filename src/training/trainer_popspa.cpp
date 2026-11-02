@@ -113,6 +113,8 @@ namespace lfs::training {
         opt.lambda_dssim = opt.popspa_ssim_weight;
         opt.scale_reg = 0.0f;
         opt.opacity_reg = 0.0f;
+        opt.opacity_binarize_weight = 0.0f;
+        opt.distortion_weight = 0.0f;
         opt.erank_reg = 0.0f;
         opt.dc_reg = 0.0f;
         opt.sh_rest_reg = 0.0f;
@@ -270,7 +272,9 @@ namespace lfs::training {
                             return scored;
                     } else {
                         auto rendered = fast_rasterize_forward(*cam, model, bg, 0, 0, 0, 0,
-                                                               params_.optimization.mip_filter, image_bg);
+                                                               params_.optimization.mip_filter, image_bg,
+                                                               false, true, 1.0f, true, {},
+                                                               screen_share_axis_code(params_.optimization));
                         if (!rendered)
                             return lfs::Status::failure(std::move(rendered).error());
                         auto scored = fast_accumulate_pop_scores(rendered->second, popspa_controller_.scores());

@@ -40,6 +40,8 @@ namespace fast_lfs::rasterization {
         int screen_share_n = 0;
         float screen_share_limit = 0.0f;
         float screen_share_penalty = 0.0f;
+        int screen_share_axis = 0; // 0 max: hinge pushes all 3 log-scales; 1 area: not the shortest (screen_share.cuh)
+        float screen_share_falloff = 1.0f; // 2 weighted: axis i pushed by (s_i / s_max)^falloff
     };
 
     struct FusedAdamSettings {
@@ -55,11 +57,14 @@ namespace fast_lfs::rasterization {
         float sh_rest_reg_weight = 0.0f;
         float flatten_reg_weight = 0.0f;
         float opacity_reg_weight = 0.0f;
+        // weight * mean(o (1 - o)): pushes opacities toward 0 or 1. 0 = off.
+        float opacity_binarize_weight = 0.0f;
         float* rendered_count = nullptr;
         // Optional persistent device scalars (caller zeros). Filled by preprocess_backward
         // via block-reduce + atomicAdd so the trainer can skip loss-only reg kernels.
         float* scale_reg_loss_out = nullptr;
         float* opacity_reg_loss_out = nullptr;
+        float* opacity_binarize_loss_out = nullptr;
         float* erank_reg_loss_out = nullptr;
         float* sh_rest_reg_loss_out = nullptr;
         float* dc_reg_loss_out = nullptr;

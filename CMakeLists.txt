@@ -658,6 +658,9 @@ add_executable(${PROJECT_NAME}
     src/app/licht_command.cpp
     src/app/converter_output_paths.cpp
     src/app/converter_overwrite.cpp
+    src/app/lfe_fisheye_tool.cpp
+    src/app/lfe_genloss_tool.cpp
+    src/app/lfe_lossweight_tool.cpp
     resources/lichtfeld-studio.rc
     resources/lichtfeld-studio.manifest
 )

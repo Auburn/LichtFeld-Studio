@@ -207,8 +207,14 @@ namespace lfs::training::kernels::blob_seeding {
             }
             const float log_step = logf(v.z_max / v.z_min) / static_cast<float>(samples - 1);
 
-            const float dx = (peak[PeakX] + 0.5f - v.cx) / v.fx;
-            const float dy = (peak[PeakY] + 0.5f - v.cy) / v.fy;
+            float dx, dy;
+            if (!sweep_unproject(v, (peak[PeakX] + 0.5f - v.cx) / v.fx, (peak[PeakY] + 0.5f - v.cy) / v.fy, dx, dy)) {
+                if (threadIdx.x == 0) {
+                    result[SweepDepth] = 0.0f;
+                    result[SweepAccepted] = 0.0f;
+                }
+                return;
+            }
             const float* R = v.R;
             const float Cx = -(R[0] * v.t[0] + R[3] * v.t[1] + R[6] * v.t[2]);
             const float Cy = -(R[1] * v.t[0] + R[4] * v.t[1] + R[7] * v.t[2]);
@@ -232,8 +238,16 @@ namespace lfs::training::kernels::blob_seeding {
                     const float Z = o.R[6] * px + o.R[7] * py + o.R[8] * pz + o.t[2];
                     if (Z <= MIN_CAMERA_DEPTH)
                         continue;
-                    const int u = __float2int_rn(o.fx * X / Z + o.cx - 0.5f);
-                    const int w = __float2int_rn(o.fy * Y / Z + o.cy - 0.5f);
+                    int u, w;
+                    if (o.fisheye) {
+                        float uf, wf;
+                        sweep_project(o, X, Y, Z, uf, wf);
+                        u = __float2int_rn(uf - 0.5f);
+                        w = __float2int_rn(wf - 0.5f);
+                    } else {
+                        u = __float2int_rn(o.fx * X / Z + o.cx - 0.5f);
+                        w = __float2int_rn(o.fy * Y / Z + o.cy - 0.5f);
+                    }
                     if (u < 0 || u >= o.width || w < 0 || w >= o.height)
                         continue;
                     seen += 1.0f;

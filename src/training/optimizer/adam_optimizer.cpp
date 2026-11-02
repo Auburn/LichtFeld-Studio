@@ -278,11 +278,14 @@ namespace lfs::training {
     }
 
     void AdamOptimizer::set_screen_share_cap(const float* max_share, const int n,
-                                             const float limit, const float penalty) {
+                                             const float limit, const float penalty, const int axis,
+                                             const float falloff) {
         screen_share_max_ = max_share;
         screen_share_n_ = max_share != nullptr ? n : 0;
         screen_share_limit_ = limit;
         screen_share_penalty_ = penalty;
+        screen_share_axis_ = axis;
+        screen_share_falloff_ = falloff;
         refresh_screen_share_buffer();
     }
 
@@ -409,7 +412,8 @@ namespace lfs::training {
                 batch_stream,
                 batch_mean_step_scale_raw, batch_mean_step_scale_n,
                 mean_step_median_extent_, mean_step_far_mask_, mean_step_far_mask_n_,
-                screen_share_max_, screen_share_n_, screen_share_limit_, screen_share_penalty_);
+                screen_share_max_, screen_share_n_, screen_share_limit_, screen_share_penalty_,
+                screen_share_axis_, screen_share_falloff_);
         }
         step_param(ParamType::ShN, iteration, apply_sh_warmup);
     }
@@ -887,7 +891,9 @@ namespace lfs::training {
                 share_max,
                 share_n,
                 share_limit,
-                share_penalty);
+                share_penalty,
+                screen_share_axis_,
+                screen_share_falloff_);
             param_live.set_stream(execution_stream);
             state.exp_avg.set_stream(execution_stream);
             state.joint_bounds.set_stream(execution_stream);
@@ -1119,6 +1125,8 @@ namespace lfs::training {
         fused.scaling.screen_share_n = screen_share_n_;
         fused.scaling.screen_share_limit = screen_share_limit_;
         fused.scaling.screen_share_penalty = screen_share_penalty_;
+        fused.scaling.screen_share_axis = screen_share_axis_;
+        fused.scaling.screen_share_falloff = screen_share_falloff_;
         fused.rotation = prepare_param(ParamType::Rotation, 4, true);
         fused.opacity = prepare_param(ParamType::Opacity, 1, true);
         fused.per_splat_mean_step = per_splat_mean_step_;

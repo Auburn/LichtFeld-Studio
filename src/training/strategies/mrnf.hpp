@@ -256,6 +256,15 @@ namespace lfs::training {
 
         lfs::core::Tensor _rendered_count;
         lfs::core::Tensor _refine_weight_max;
+        // --growth-visit-normalize: per splat, the sum of the per-step error signal over the refine window and the
+        // number of steps in which it was positive (visits); the edge window's visit count likewise. Released when off.
+        lfs::core::Tensor _refine_weight_sum;
+        lfs::core::Tensor _refine_weight_sq; // sum of squares, for growth_visit_stat "weighted"
+        lfs::core::Tensor _refine_visits;
+        lfs::core::Tensor _edge_visits;
+        [[nodiscard]] bool visit_normalized_growth() const;
+        // Zero-filled visit buffers of the current size (or released when the option is off).
+        void reset_visit_buffers();
         lfs::core::Tensor _precomputed_edge_scores;
         bool _edge_precompute_valid = false;
         lfs::core::Tensor _edge_score_sum;

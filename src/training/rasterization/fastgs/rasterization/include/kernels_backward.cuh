@@ -5,6 +5,7 @@
 #pragma once
 
 #include "buffer_utils.h"
+#include "fisheye_projection.cuh"
 #include "helper_math.h"
 #include "kernel_utils.cuh"
 #include "lfs/core/warp_reduce.cuh"
@@ -35,7 +36,7 @@ namespace fast_lfs::rasterization::kernels::backward {
 
     // minBlocks=3 budgets registers so shN Adam no longer lives across
     // the geometry backward (sweep 2..4; 3 is the measured default).
-    template <bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES = false>
+    template <bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES = false, bool FISHEYE = false>
     __global__ void __launch_bounds__(config::block_size_preprocess_backward, 3) preprocess_backward_cu(
         // These four alias fused_adam.{means,scaling,rotation,opacity}.param (Adam writes).
         const float3* means,
@@ -73,7 +74,11 @@ namespace fast_lfs::rasterization::kernels::backward {
         // path; reading sh_coefficients_rest must always use these.
         const float2* __restrict__ shN_value_bounds,
         const uint shN_value_n_cells,
-        const uint shN_value_bits) {
+        const uint shN_value_bits,
+        const FastGSLens lens,
+        // depth distortion (null = off): dL/d(distortion depth) per model splat and how that depth was made
+        const float* __restrict__ grad_distortion_depth,
+        const int distortion_depth_mode) {
         (void)cx;
         (void)cy;
         auto primitive_idx = cg::this_grid().thread_rank();
@@ -146,6 +151,20 @@ namespace fast_lfs::rasterization::kernels::backward {
             const float block_sum = lfs::core::warp_ops::block_reduce_sum(opacity_loss_local);
             if (threadIdx.x == 0 && block_sum != 0.0f) {
                 atomicAdd(fused_adam.opacity_reg_loss_out, block_sum);
+            }
+        }
+        // Opacity binarization loss w * mean(o (1 - o)); its gradient is in opacity_extra_grad.
+        if (fused_adam.opacity_binarize_loss_out != nullptr) {
+            float binarize_loss_local = 0.0f;
+            if (in_range && fused_adam.opacity_binarize_weight > 0.0f &&
+                fused_adam.opacity.param != nullptr && fused_adam.opacity.n_elements > 0) {
+                const float opa = sigmoid(fused_adam.opacity.param[primitive_idx]);
+                binarize_loss_local = fused_adam.opacity_binarize_weight * opa * (1.0f - opa) /
+                                      static_cast<float>(fused_adam.opacity.n_elements);
+            }
+            const float block_sum = lfs::core::warp_ops::block_reduce_sum(binarize_loss_local);
+            if (threadIdx.x == 0 && block_sum != 0.0f) {
+                atomicAdd(fused_adam.opacity_binarize_loss_out, block_sum);
             }
         }
         if constexpr (!DISABLED_FEATURES)
@@ -290,6 +309,13 @@ namespace fast_lfs::rasterization::kernels::backward {
             const float x = (w2c_r1.x * mean3d.x + w2c_r1.y * mean3d.y + w2c_r1.z * mean3d.z + w2c_r1.w) * inv_depth;
             const float4 w2c_r2 = w2c[1];
             const float y = (w2c_r2.x * mean3d.x + w2c_r2.y * mean3d.y + w2c_r2.z * mean3d.z + w2c_r2.w) * inv_depth;
+            // fisheye: the camera-space centre (visible means z > 0; the forward culled the rest)
+            const float3 cam_p = FISHEYE
+                                     ? make_float3(
+                                           w2c_r1.x * mean3d.x + w2c_r1.y * mean3d.y + w2c_r1.z * mean3d.z + w2c_r1.w,
+                                           w2c_r2.x * mean3d.x + w2c_r2.y * mean3d.y + w2c_r2.z * mean3d.z + w2c_r2.w,
+                                           depth_safe)
+                                     : make_float3(0.0f, 0.0f, 1.0f);
 
             // compute 3d covariance from raw scale and rotation
             const float3 raw_scale = raw_scales[primitive_idx];
@@ -334,14 +360,31 @@ namespace fast_lfs::rasterization::kernels::backward {
             const float j13 = -j11 * tx;
             const float j22 = fy * inv_depth;
             const float j23 = -j22 * ty;
-            const float3 jw_r1 = make_float3(
-                j11 * w2c_r1.x + j13 * w2c_r3.x,
-                j11 * w2c_r1.y + j13 * w2c_r3.y,
-                j11 * w2c_r1.z + j13 * w2c_r3.z);
-            const float3 jw_r2 = make_float3(
-                j22 * w2c_r2.x + j23 * w2c_r3.x,
-                j22 * w2c_r2.y + j23 * w2c_r3.y,
-                j22 * w2c_r2.z + j23 * w2c_r3.z);
+            float3 jw_r1, jw_r2;
+            fisheye::Terms fish_terms{};
+            float3 fish_j1 = make_float3(0.0f), fish_j2 = make_float3(0.0f);
+            if constexpr (FISHEYE) {
+                fish_terms = fisheye::terms<true>(lens, cam_p.x * cam_p.x + cam_p.y * cam_p.y, cam_p.z);
+                float2 unused_mean2d;
+                fisheye::project(fish_terms, cam_p, fx, fy, cx, cy, unused_mean2d, fish_j1, fish_j2);
+                jw_r1 = make_float3(
+                    fish_j1.x * w2c_r1.x + fish_j1.y * w2c_r2.x + fish_j1.z * w2c_r3.x,
+                    fish_j1.x * w2c_r1.y + fish_j1.y * w2c_r2.y + fish_j1.z * w2c_r3.y,
+                    fish_j1.x * w2c_r1.z + fish_j1.y * w2c_r2.z + fish_j1.z * w2c_r3.z);
+                jw_r2 = make_float3(
+                    fish_j2.x * w2c_r1.x + fish_j2.y * w2c_r2.x + fish_j2.z * w2c_r3.x,
+                    fish_j2.x * w2c_r1.y + fish_j2.y * w2c_r2.y + fish_j2.z * w2c_r3.y,
+                    fish_j2.x * w2c_r1.z + fish_j2.y * w2c_r2.z + fish_j2.z * w2c_r3.z);
+            } else {
+                jw_r1 = make_float3(
+                    j11 * w2c_r1.x + j13 * w2c_r3.x,
+                    j11 * w2c_r1.y + j13 * w2c_r3.y,
+                    j11 * w2c_r1.z + j13 * w2c_r3.z);
+                jw_r2 = make_float3(
+                    j22 * w2c_r2.x + j23 * w2c_r3.x,
+                    j22 * w2c_r2.y + j23 * w2c_r3.y,
+                    j22 * w2c_r2.z + j23 * w2c_r3.z);
+            }
             const float3 jwc_r1 = make_float3(
                 jw_r1.x * cov3d.m11 + jw_r1.y * cov3d.m12 + jw_r1.z * cov3d.m13,
                 jw_r1.x * cov3d.m12 + jw_r1.y * cov3d.m22 + jw_r1.z * cov3d.m23,
@@ -414,19 +457,54 @@ namespace fast_lfs::rasterization::kernels::backward {
             // mean3d camera space gradient from J and mean2d (accounts for tx/ty clipping)
             const float2 dL_dmean2d = grad_mean2d[work_idx];
             const float dL_ddepth = grad_depth ? grad_depth[work_idx] : 0.0f;
-            float3 dL_dmean3d_cam = make_float3(
-                j11 * dL_dmean2d.x,
-                j22 * dL_dmean2d.y,
-                -j11 * x * dL_dmean2d.x - j22 * y * dL_dmean2d.y + dL_ddepth);
-            const bool valid_x = x >= clip_left && x <= clip_right;
-            const bool valid_y = y >= clip_top && y <= clip_bottom;
-            if (valid_x)
-                dL_dmean3d_cam.x -= j11 * dL_dj13 * inv_depth;
-            if (valid_y)
-                dL_dmean3d_cam.y -= j22 * dL_dj23 * inv_depth;
-            const float factor_x = 1.0f + static_cast<float>(valid_x);
-            const float factor_y = 1.0f + static_cast<float>(valid_y);
-            dL_dmean3d_cam.z += (j11 * (factor_x * tx * dL_dj13 - dL_dj11) + j22 * (factor_y * ty * dL_dj23 - dL_dj22)) * inv_depth;
+            float3 dL_dmean3d_cam;
+            if constexpr (FISHEYE) {
+                // through the projected centre (J^T dL/dmean2d), through J itself (its Hessian
+                // against dL/dJ), and through the depth, which is the distance from the camera
+                const float3 dL_dj_r1 = make_float3(
+                    dL_dj11,
+                    w2c_r2.x * dL_djw_r1.x + w2c_r2.y * dL_djw_r1.y + w2c_r2.z * dL_djw_r1.z,
+                    dL_dj13);
+                const float3 dL_dj_r2 = make_float3(
+                    w2c_r1.x * dL_djw_r2.x + w2c_r1.y * dL_djw_r2.y + w2c_r1.z * dL_djw_r2.z,
+                    dL_dj22,
+                    dL_dj23);
+                const float inv_dist = rsqrtf(fmaxf(dot(cam_p, cam_p), 1e-20f));
+                dL_dmean3d_cam = fish_j1 * dL_dmean2d.x + fish_j2 * dL_dmean2d.y +
+                                 fisheye::jacobian_backward(fish_terms, cam_p, fx, fy, dL_dj_r1, dL_dj_r2) +
+                                 cam_p * (dL_ddepth * inv_dist);
+            } else {
+                dL_dmean3d_cam = make_float3(
+                    j11 * dL_dmean2d.x,
+                    j22 * dL_dmean2d.y,
+                    -j11 * x * dL_dmean2d.x - j22 * y * dL_dmean2d.y + dL_ddepth);
+                const bool valid_x = x >= clip_left && x <= clip_right;
+                const bool valid_y = y >= clip_top && y <= clip_bottom;
+                if (valid_x)
+                    dL_dmean3d_cam.x -= j11 * dL_dj13 * inv_depth;
+                if (valid_y)
+                    dL_dmean3d_cam.y -= j22 * dL_dj23 * inv_depth;
+                const float factor_x = 1.0f + static_cast<float>(valid_x);
+                const float factor_y = 1.0f + static_cast<float>(valid_y);
+                dL_dmean3d_cam.z += (j11 * (factor_x * tx * dL_dj13 - dL_dj11) + j22 * (factor_y * ty * dL_dj23 - dL_dj22)) * inv_depth;
+            }
+            // Depth distortion: its own per-splat depth (FastGSDistortion). The distance |p| moves the mean
+            // along p / |p| (fisheye always; pinhole with kDistortionDepthDistance); camera z along the axis.
+            if (grad_distortion_depth != nullptr) {
+                const float g = grad_distortion_depth[primitive_idx];
+                if (g != 0.0f) {
+                    if (FISHEYE || distortion_depth_mode == kDistortionDepthDistance) {
+                        const float3 p = make_float3(
+                            w2c_r1.x * mean3d.x + w2c_r1.y * mean3d.y + w2c_r1.z * mean3d.z + w2c_r1.w,
+                            w2c_r2.x * mean3d.x + w2c_r2.y * mean3d.y + w2c_r2.z * mean3d.z + w2c_r2.w,
+                            depth);
+                        const float inv_dist = rsqrtf(fmaxf(dot(p, p), 1e-20f));
+                        dL_dmean3d_cam += p * (g * inv_dist);
+                    } else {
+                        dL_dmean3d_cam.z += g;
+                    }
+                }
+            }
 
             if (grad_w2c != nullptr) {
                 atomicAdd(&grad_w2c[0].w, dL_dmean3d_cam.x);
@@ -656,8 +734,10 @@ namespace fast_lfs::rasterization::kernels::backward {
     // ---------------------------------------------------------------------------
     // The removal-impact walk keeps a colour composite per pixel live; at 8 blocks per SM it spills
     // on every fragment, at 6 it fits in registers and runs faster.
-    template <DensificationType DENSIFICATION_TYPE, bool NORMAL_CHANNEL, bool IMPACT_SCORE, int WARP_CULL_MODE = 0>
-    __global__ void __launch_bounds__(config::block_size_blend_backward, IMPACT_SCORE ? 6 : 8) blend_backward_cu(
+    // DISTORTION: adds the depth distortion loss gradients (FastGSDistortion); off = unchanged.
+    template <DensificationType DENSIFICATION_TYPE, bool NORMAL_CHANNEL, bool IMPACT_SCORE, int WARP_CULL_MODE = 0,
+              bool DISTORTION = false>
+    __global__ void __launch_bounds__(config::block_size_blend_backward, (IMPACT_SCORE || DISTORTION) ? 6 : 8) blend_backward_cu(
         const uint2* __restrict__ tile_instance_ranges,
         const uint* __restrict__ instance_primitive_indices,
         const uint* __restrict__ primitive_work_indices,
@@ -693,7 +773,8 @@ namespace fast_lfs::rasterization::kernels::backward {
         const uint width,
         const uint height,
         const uint grid_width,
-        const int blend_batch_size_runtime) {
+        const int blend_batch_size_runtime,
+        const FastGSDistortion distortion) {
         (void)image;
         (void)alpha_map;
         auto block = cg::this_thread_block();
@@ -802,6 +883,27 @@ namespace fast_lfs::rasterization::kernels::backward {
         }
         const float grad_d0 = (inside0 && grad_depth_map != nullptr) ? grad_depth_map[pixel_idx0] : 0.0f;
         const float grad_d1 = (inside1 && grad_depth_map != nullptr) ? grad_depth_map[pixel_idx1] : 0.0f;
+        // Depth distortion: the pixel totals over the splats taking part A = sum w, M1 = sum w m,
+        // M2 = sum w m^2 (so D = A M2 - M1^2), and s = dL/dD. Then for a splat taking part
+        // dL/dw_i = s (m_i^2 A + M2 - 2 m_i M1) and dL/dm_i = 2 s w_i (m_i A - M1); 0 for one left out.
+        float dist_a0 = 0.0f, dist_m1_0 = 0.0f, dist_m2_0 = 0.0f, dist_s0 = 0.0f;
+        float dist_a1 = 0.0f, dist_m1_1 = 0.0f, dist_m2_1 = 0.0f, dist_s1 = 0.0f;
+        if constexpr (DISTORTION) {
+            if (inside0) {
+                dist_a0 = distortion.moments[2 * n_pixels + pixel_idx0];
+                dist_m1_0 = distortion.moments[pixel_idx0];
+                dist_m2_0 = distortion.moments[n_pixels + pixel_idx0];
+                dist_s0 = distortion.grad_scale *
+                          (distortion.pixel_weight != nullptr ? distortion.pixel_weight[pixel_idx0] : 1.0f);
+            }
+            if (inside1) {
+                dist_a1 = distortion.moments[2 * n_pixels + pixel_idx1];
+                dist_m1_1 = distortion.moments[pixel_idx1];
+                dist_m2_1 = distortion.moments[n_pixels + pixel_idx1];
+                dist_s1 = distortion.grad_scale *
+                          (distortion.pixel_weight != nullptr ? distortion.pixel_weight[pixel_idx1] : 1.0f);
+            }
+        }
         float3 grad_n0 = make_float3(0.0f);
         float3 grad_n1 = make_float3(0.0f);
         if constexpr (NORMAL_CHANNEL) {
@@ -888,6 +990,7 @@ namespace fast_lfs::rasterization::kernels::backward {
         __shared__ float3 s_normal[NORMAL_CHANNEL ? config::block_size_blend_backward : 1];
         __shared__ unsigned char s_valid_splat[config::block_size_blend_backward];
         __shared__ ushort4 s_pixel_bbox[config::block_size_blend_backward];
+        __shared__ float s_distortion_depth[DISTORTION ? config::block_size_blend_backward : 1];
         const bool stage_depth = grad_depth_map != nullptr;
 
         // Reverse walk: batch_base is reverse-order index into [0, T_eff).
@@ -944,6 +1047,9 @@ namespace fast_lfs::rasterization::kernels::backward {
                     if constexpr (NORMAL_CHANNEL) {
                         s_normal[thread_rank] = primitive_normals[work_idx];
                     }
+                    if constexpr (DISTORTION) {
+                        s_distortion_depth[thread_rank] = distortion.depths[primitive_idx];
+                    }
                 } else {
                     s_prim_idx[thread_rank] = 0u;
                     s_work_idx[thread_rank] = 0u;
@@ -955,6 +1061,9 @@ namespace fast_lfs::rasterization::kernels::backward {
                         s_depth[thread_rank] = 0.0f;
                     if constexpr (NORMAL_CHANNEL) {
                         s_normal[thread_rank] = make_float3(0.0f);
+                    }
+                    if constexpr (DISTORTION) {
+                        s_distortion_depth[thread_rank] = -1.0f;
                     }
                 }
             }
@@ -1026,6 +1135,12 @@ namespace fast_lfs::rasterization::kernels::backward {
                     if constexpr (NORMAL_CHANNEL) {
                         normal = s_normal[j];
                     }
+                    // distortion depth (< 0 = left out of the distortion term) and its gradient sum
+                    float distortion_d = -1.0f;
+                    if constexpr (DISTORTION) {
+                        distortion_d = s_distortion_depth[j];
+                    }
+                    float distortion_depth_grad = 0.0f;
 
                     BlendBackwardAccum accum = make_zero_blend_backward_accum();
                     float impact_sum = 0.0f;
@@ -1038,7 +1153,9 @@ namespace fast_lfs::rasterization::kernels::backward {
                                                 const float edge_weight,
                                                 float& T, float3& grad_c, float& grad_T,
                                                 const float grad_d, const float3& grad_n,
-                                                float3& behind) {
+                                                float3& behind,
+                                                const float dist_a, const float dist_m1,
+                                                const float dist_m2, const float dist_s) {
                         if (!use || !inside || static_cast<uint>(tile_primitive_idx) >= last)
                             return;
                         const float2 delta = mean2d - pixel;
@@ -1087,13 +1204,28 @@ namespace fast_lfs::rasterization::kernels::backward {
                         accum.color_y += dL_dcolor.y;
                         accum.color_z += dL_dcolor.z;
 
-                        const float dL_dalpha =
+                        float dL_dalpha =
                             dot(transmittance_before * color, grad_c) -
                             grad_transmittance_after * transmittance_before +
                             transmittance_before * depth * grad_d +
                             transmittance_before * normal_dot_grad;
+                        // dist_g = dL/dw of this splat (through the weights), dist_depth_g = dL/dd (through m);
+                        // both 0 for a splat left out (it still passes the others' gradient on through T)
+                        float dist_g = 0.0f;
+                        float dist_depth_g = 0.0f;
+                        if constexpr (DISTORTION) {
+                            if (distortion_d >= 0.0f) {
+                                float dm_dd;
+                                const float m = distortion_depth(distortion_d, distortion.near_n, distortion.far_n, dm_dd);
+                                dist_g = dist_s * (m * m * dist_a + dist_m2 - 2.0f * m * dist_m1);
+                                dist_depth_g = 2.0f * dist_s * (m * dist_a - dist_m1) * dm_dd;
+                                dL_dalpha += transmittance_before * dist_g;
+                            }
+                        }
                         accum.compensated_opacity += alpha_saturated ? 0.0f : gaussian * dL_dalpha;
                         accum.depth += blending_weight * grad_d;
+                        if constexpr (DISTORTION)
+                            distortion_depth_grad += blending_weight * dist_depth_g;
                         if constexpr (NORMAL_CHANNEL) {
                             accum.normal_x += blending_weight * grad_n.x;
                             accum.normal_y += blending_weight * grad_n.y;
@@ -1120,12 +1252,16 @@ namespace fast_lfs::rasterization::kernels::backward {
                                  alpha * depth * grad_d +
                                  alpha * normal_dot_grad +
                                  grad_transmittance_after * one_minus_alpha;
+                        if constexpr (DISTORTION)
+                            grad_T += alpha * dist_g;
                     };
 
                     accumulate_pixel(use0, inside0, last0, pixel0, pixel_error0, edge_weight0,
-                                     T0, grad_c0, grad_T0, grad_d0, grad_n0, behind0);
+                                     T0, grad_c0, grad_T0, grad_d0, grad_n0, behind0,
+                                     dist_a0, dist_m1_0, dist_m2_0, dist_s0);
                     accumulate_pixel(use1, inside1, last1, pixel1, pixel_error1, edge_weight1,
-                                     T1, grad_c1, grad_T1, grad_d1, grad_n1, behind1);
+                                     T1, grad_c1, grad_T1, grad_d1, grad_n1, behind1,
+                                     dist_a1, dist_m1_1, dist_m2_1, dist_s1);
 
                     // Warp-reduce → one global atomic per splat per warp.
                     const unsigned contrib_mask = __ballot_sync(0xffffffffu, has_contribution);
@@ -1170,7 +1306,15 @@ namespace fast_lfs::rasterization::kernels::backward {
                                                       ? __shfl_sync(0xffffffffu, impact_peak, src_lane)
                                                       : lfs::core::warp_ops::warp_reduce_max(impact_peak);
                         }
+                        float reduced_distortion_depth_grad = 0.0f;
+                        if constexpr (DISTORTION) {
+                            reduced_distortion_depth_grad = reduce_field(distortion_depth_grad);
+                        }
                         if (lane_id == 0u) {
+                            if constexpr (DISTORTION) {
+                                if (reduced_distortion_depth_grad != 0.0f)
+                                    atomicAdd(&distortion.grad_depths[primitive_idx], clamp_grad(reduced_distortion_depth_grad));
+                            }
                             atomicAdd(&grad_mean2d[work_idx].x, clamp_grad(mean_x));
                             atomicAdd(&grad_mean2d[work_idx].y, clamp_grad(mean_y));
                             atomicAdd(&grad_conic[work_idx].x, clamp_grad(conic_x));

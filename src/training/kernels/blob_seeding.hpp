@@ -7,7 +7,14 @@
 #include "core/tensor.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdint>
+
+#ifdef __CUDACC__
+#define LFS_BLOB_HD __host__ __device__
+#else
+#define LFS_BLOB_HD
+#endif
 
 namespace lfs::training::kernels::blob_seeding {
 
@@ -39,7 +46,57 @@ namespace lfs::training::kernels::blob_seeding {
         const uint32_t* bitmap;
         float density[2];
         float z_min, z_max;
+        // OPENCV_FISHEYE lens of a natively trained fisheye camera (--native-fisheye); 0 = pinhole
+        int fisheye = 0;
+        float k[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     };
+
+    // A view's pixel ray as (dx, dy, 1) in camera space from (m_x, m_y) = ((u - cx) / fx, (v - cy) / fy);
+    // false where a fisheye ray is not in front of the camera (theta past ~89 degrees).
+    LFS_BLOB_HD inline bool sweep_unproject(const SweepView& v, const float mx, const float my, float& dx, float& dy) {
+        if (!v.fisheye) {
+            dx = mx;
+            dy = my;
+            return true;
+        }
+        const float td = sqrtf(mx * mx + my * my);
+        if (td < 1e-7f) {
+            dx = mx;
+            dy = my;
+            return true;
+        }
+        // theta_d(theta) is increasing on the bracket the lens is used in: bisect it
+        float lo = 0.0f, hi = 1.56f;
+        for (int i = 0; i < 40; ++i) {
+            const float th = 0.5f * (lo + hi);
+            const float t2 = th * th;
+            const float d = th * (1.0f + t2 * (v.k[0] + t2 * (v.k[1] + t2 * (v.k[2] + t2 * v.k[3]))));
+            (d < td ? lo : hi) = th;
+        }
+        const float th = 0.5f * (lo + hi);
+        if (!(th < 1.555f))
+            return false;
+        const float s = tanf(th) / td;
+        dx = mx * s;
+        dy = my * s;
+        return true;
+    }
+
+    // A camera-space point (Z > 0) to the view's pixel coordinates (pixel centres at +0.5).
+    LFS_BLOB_HD inline void sweep_project(const SweepView& v, const float X, const float Y, const float Z, float& u, float& w) {
+        if (!v.fisheye) {
+            u = v.fx * X / Z + v.cx;
+            w = v.fy * Y / Z + v.cy;
+            return;
+        }
+        const float rho = sqrtf(X * X + Y * Y);
+        const float th = atan2f(rho, Z);
+        const float t2 = th * th;
+        const float td = th * (1.0f + t2 * (v.k[0] + t2 * (v.k[1] + t2 * (v.k[2] + t2 * v.k[3]))));
+        const float s = rho > 1e-7f * Z ? td / rho : 1.0f / Z;
+        u = v.fx * s * X + v.cx;
+        w = v.fy * s * Y + v.cy;
+    }
 
     // Detects compact bright and dark blobs (local contrast maxima over a 5x5 window, contrast =
     // 0-255 luminance against its 7x7 grey opening or closing) in a CUDA float32 [C, H, W] image

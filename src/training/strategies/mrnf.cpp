@@ -623,6 +623,7 @@ namespace lfs::training {
             reset_vector_buffer(_rendered_count, n, _splat_data->means().device(), tracking_capacity);
         else
             _rendered_count = lfs::core::Tensor();
+        reset_visit_buffers();
 
         publish_vram_attribution();
         compute_bounds();
@@ -631,7 +632,8 @@ namespace lfs::training {
         cancel_blob_seeding();
         // A point cloud that already fills the capacity leaves no room for seeds, so skip capturing views for them.
         if (n > 0 && (_params->max_cap <= 0 || static_cast<int64_t>(n) < int64_t{_params->max_cap}))
-            _blob_seeder = std::make_unique<BlobSeeder>(_splat_data->means());
+            _blob_seeder = std::make_unique<BlobSeeder>(_splat_data->means(), BlobSeeder::DEFAULT_MAX_DETECTION_PIXELS,
+                                                        _params->native_fisheye && !_params->gut);
         if (_params->growth_exchange) {
             LOG_DEBUG("MRNF: growth exchange starts at {:.1f}% per refine and tapers until iter {}",
                       100.0 * MRNF_EXCHANGE_START_SHARE, _params->grow_until_iter);
@@ -657,6 +659,11 @@ namespace lfs::training {
             _edge_score_sum.numel() != n) {
             _edge_score_sum = zero_splat_vector(n, _splat_data->means().device());
             _edge_sample_count = 0;
+            _edge_visits = visit_normalized_growth() ? zero_splat_vector(n, _splat_data->means().device())
+                                                     : lfs::core::Tensor();
+        } else if (visit_normalized_growth() && (!_edge_visits.is_valid() || _edge_visits.numel() != n)) {
+            // Option switched on mid-window: count visits from here (the window mean is then over these only).
+            _edge_visits = zero_splat_vector(n, _splat_data->means().device());
         }
         if (!_edge_view_scores.is_valid() || _edge_view_scores.ndim() != 1 ||
             _edge_view_scores.numel() != n) {
@@ -682,6 +689,9 @@ namespace lfs::training {
         normalize_by_positive_median_inplace(_edge_view_scores);
         zero_frozen_scores_inplace(*_splat_data, _edge_view_scores);
         _edge_score_sum.add_(_edge_view_scores);
+        if (visit_normalized_growth() && _edge_visits.is_valid() && _edge_visits.numel() == _edge_view_scores.numel())
+            mrnf_strategy::launch_count_positive(_edge_view_scores.ptr<float>(), _edge_visits.ptr<float>(),
+                                                 _edge_visits.numel());
         ++_edge_sample_count;
         publish_vram_attribution();
     }
@@ -718,7 +728,15 @@ namespace lfs::training {
         const int completed_views = std::exchange(_edge_sample_count, 0);
         _precomputed_edge_scores = std::move(_edge_score_sum);
         _edge_view_scores = lfs::core::Tensor();
-        _precomputed_edge_scores.div_(static_cast<float>(completed_views));
+        if (visit_normalized_growth() && _edge_visits.is_valid() &&
+            _edge_visits.numel() == _precomputed_edge_scores.numel()) {
+            // Mean over the views that saw the splat, not over every view of the window (which scales with coverage).
+            mrnf_strategy::launch_mean_per_visit(_precomputed_edge_scores.ptr<float>(), _edge_visits.ptr<float>(),
+                                                 _precomputed_edge_scores.ptr<float>(), _precomputed_edge_scores.numel());
+        } else {
+            _precomputed_edge_scores.div_(static_cast<float>(completed_views));
+        }
+        _edge_visits = lfs::core::Tensor();
         zero_frozen_scores_inplace(*_splat_data, _precomputed_edge_scores);
         _edge_precompute_valid = true;
         publish_vram_attribution();
@@ -749,7 +767,27 @@ namespace lfs::training {
     void MRNF::reset_edge_accumulator() {
         _edge_score_sum = lfs::core::Tensor();
         _edge_view_scores = lfs::core::Tensor();
+        _edge_visits = lfs::core::Tensor();
         _edge_sample_count = 0;
+    }
+
+    bool MRNF::visit_normalized_growth() const {
+        return _params && _params->growth_visit_normalize;
+    }
+
+    void MRNF::reset_visit_buffers() {
+        if (!visit_normalized_growth() || !_splat_data) {
+            _refine_weight_sum = lfs::core::Tensor();
+            _refine_weight_sq = lfs::core::Tensor();
+            _refine_visits = lfs::core::Tensor();
+            return;
+        }
+        const size_t n = static_cast<size_t>(_splat_data->size());
+        const size_t tracking_capacity = splat_reserved_capacity(*_splat_data);
+        const auto device = _splat_data->means().device();
+        reset_vector_buffer(_refine_weight_sum, n, device, tracking_capacity);
+        reset_vector_buffer(_refine_weight_sq, n, device, tracking_capacity);
+        reset_vector_buffer(_refine_visits, n, device, tracking_capacity);
     }
 
     void MRNF::publish_vram_attribution() noexcept {
@@ -775,6 +813,10 @@ namespace lfs::training {
             };
 
             account_tensor("refine_weight_max", _refine_weight_max);
+            account_tensor("refine_weight_sum", _refine_weight_sum);
+            account_tensor("refine_weight_sq", _refine_weight_sq);
+            account_tensor("refine_visits", _refine_visits);
+            account_tensor("edge.visits", _edge_visits);
             account_tensor("free_mask", _free_mask);
             account_tensor("refine_counts_device", _refine_counts_dev);
             account_tensor("edge.precomputed_scores", _precomputed_edge_scores);
@@ -855,6 +897,10 @@ namespace lfs::training {
                 lfs::training::sh_value::commit_shN_after_mutation(*_splat_data);
             }
             _refine_weight_max = Tensor();
+            _refine_weight_sum = Tensor();
+            _refine_weight_sq = Tensor();
+            _refine_visits = Tensor();
+            _edge_visits = Tensor();
             _gumbel_scratch.release();
             _densify_n_scratch.release();
             reset_exchange_state();
@@ -887,10 +933,24 @@ namespace lfs::training {
         assert(info.shape()[1] == n);
 
         if (_refine_weight_max.numel() == n) {
-            mrnf_strategy::launch_fold_densification_error_and_zero(
-                _refine_weight_max.ptr<float>(),
-                _splat_data->_densification_info.ptr<float>(),
-                n);
+            if (visit_normalized_growth()) {
+                if (_refine_weight_sum.numel() != n || _refine_weight_sq.numel() != n || _refine_visits.numel() != n) {
+                    // Row count changed outside refine (e.g. an edit): restart the window's sums.
+                    reset_visit_buffers();
+                }
+                mrnf_strategy::launch_fold_densification_error_visits_and_zero(
+                    _refine_weight_max.ptr<float>(),
+                    _refine_weight_sum.ptr<float>(),
+                    _refine_weight_sq.ptr<float>(),
+                    _refine_visits.ptr<float>(),
+                    _splat_data->_densification_info.ptr<float>(),
+                    n);
+            } else {
+                mrnf_strategy::launch_fold_densification_error_and_zero(
+                    _refine_weight_max.ptr<float>(),
+                    _splat_data->_densification_info.ptr<float>(),
+                    n);
+            }
             zero_frozen_scores_inplace(*_splat_data, _refine_weight_max);
             auto vis = _splat_data->_densification_info.slice(0, 0, 1).squeeze(0);
             zero_frozen_scores_inplace(*_splat_data, vis);
@@ -917,6 +977,10 @@ namespace lfs::training {
         morton::permute_row_tensor(_refine_weight_max, perm);
         if (_rendered_count.is_valid())
             morton::permute_row_tensor(_rendered_count, perm);
+        morton::permute_row_tensor(_refine_weight_sum, perm);
+        morton::permute_row_tensor(_refine_weight_sq, perm);
+        morton::permute_row_tensor(_refine_visits, perm);
+        morton::permute_row_tensor(_edge_visits, perm);
         morton::permute_row_tensor(_precomputed_edge_scores, perm);
         morton::permute_row_tensor(_edge_score_sum, perm);
         morton::permute_row_tensor(_free_mask, perm);
@@ -1007,6 +1071,38 @@ namespace lfs::training {
             LFS_COUNTER_ADD("strategy.mrnf.pruned", pruned_count);
         }
 
+        if (visit_normalized_growth() && _refine_weight_max.numel() == n && _refine_weight_sum.numel() == n &&
+            _refine_weight_sq.numel() == n && _refine_visits.numel() == n) {
+            // Growth score: a per-visit statistic of the error signal instead of the window maximum. Candidates,
+            // growth weights and the ROI damping below all read _refine_weight_max, so it takes the statistic
+            // here; the window's buffers are reset after growth like the maximum.
+            //   mean:     sum / visits
+            //   weighted: sum of squares / sum (the mean weighted by the signal itself)
+            const bool weighted = _params->growth_visit_stat == "weighted";
+            const bool growing = iter < static_cast<int>(_params->grow_until_iter);
+            size_t by_max = 0;
+            if (growing)
+                by_max = compute_refine_candidates().count_nonzero();
+            if (weighted)
+                mrnf_strategy::launch_mean_per_visit(_refine_weight_sq.ptr<float>(), _refine_weight_sum.ptr<float>(),
+                                                     _refine_weight_max.ptr<float>(), n);
+            else
+                mrnf_strategy::launch_mean_per_visit(_refine_weight_sum.ptr<float>(), _refine_visits.ptr<float>(),
+                                                     _refine_weight_max.ptr<float>(), n);
+            zero_frozen_scores_inplace(*_splat_data, _refine_weight_max);
+            if (growing) {
+                const size_t by_stat = compute_refine_candidates().count_nonzero();
+                const auto seen = _refine_visits > 0.0f;
+                const size_t seen_count = seen.count_nonzero();
+                const float visit_sum = _refine_visits.sum().item<float>();
+                LOG_INFO("MRNF visit-normalized growth ({}), iter {}: {} candidates (the window maximum would give {}, "
+                         "{:+.1f}%); {} splats visited, {:.1f} visits each on average",
+                         weighted ? "signal-weighted mean" : "mean per visit", iter, by_stat, by_max,
+                         by_max > 0 ? 100.0 * (static_cast<double>(by_stat) / static_cast<double>(by_max) - 1.0) : 0.0,
+                         seen_count, seen_count > 0 ? visit_sum / static_cast<float>(seen_count) : 0.0f);
+            }
+        }
+
         const Tensor refine_candidates = compute_refine_candidates();
         const bool exchanging = growth_exchange_active(iter);
         bool exchange_ready = false;
@@ -1064,6 +1160,7 @@ namespace lfs::training {
         reset_vector_buffer(_refine_weight_max, new_n, _splat_data->means().device(), tracking_capacity);
         if (_params->opacity_decay_rendered_only && !_params->gut)
             reset_vector_buffer(_rendered_count, new_n, _splat_data->means().device(), tracking_capacity);
+        reset_visit_buffers();
         ensure_densification_info_shape();
         _splat_data->_densification_info.zero_();
         if (_splat_data->_max_screen_share.is_valid() &&
@@ -1555,6 +1652,7 @@ namespace lfs::training {
             cudaMemcpy(host_counts, _refine_counts_dev.ptr<int64_t>(),
                        4 * sizeof(int64_t), cudaMemcpyDeviceToHost),
             "MRNF grow packed counts D2H");
+        const int64_t candidate_count = host_counts[0];
         const int desired_total = static_cast<int>(
             std::round(static_cast<float>(host_counts[0]) * _params->grow_fraction));
         const int selectable_replace = static_cast<int>(host_counts[2]);
@@ -1614,6 +1712,8 @@ namespace lfs::training {
 
         result.replacement_count = replace_inds.is_valid() ? static_cast<int>(replace_inds.numel()) : 0;
         result.growth_count = growth_inds.is_valid() ? static_cast<int>(growth_inds.numel()) : 0;
+        LOG_DEBUG("MRNF growth at iter {}: {} candidates, desired {}, budget {}, replaced {}, grown {}",
+                  iter, candidate_count, desired_total, budget, result.replacement_count, result.growth_count);
 
         const auto assemble_split_indices = [&]() {
             std::vector<Tensor> split_parts;
@@ -2070,6 +2170,14 @@ namespace lfs::training {
             compact(_refine_weight_max);
         if (_rendered_count.is_valid() && _rendered_count.numel() > new_size)
             compact(_rendered_count);
+        if (_refine_weight_sum.is_valid() && _refine_weight_sum.numel() > new_size)
+            compact(_refine_weight_sum);
+        if (_refine_weight_sq.is_valid() && _refine_weight_sq.numel() > new_size)
+            compact(_refine_weight_sq);
+        if (_refine_visits.is_valid() && _refine_visits.numel() > new_size)
+            compact(_refine_visits);
+        if (_edge_visits.is_valid() && _edge_visits.numel() > new_size)
+            compact(_edge_visits);
         if (_precomputed_edge_scores.is_valid() && _precomputed_edge_scores.numel() > new_size)
             compact(_precomputed_edge_scores);
         if (_edge_score_sum.is_valid() && _edge_score_sum.numel() > new_size)
@@ -2488,6 +2596,11 @@ namespace lfs::training {
             ensure(_rendered_count, DataType::Float32);
         ensure(_free_mask, DataType::Bool);
         ensure(_refine_weight_max, DataType::Float32);
+        if (visit_normalized_growth()) {
+            ensure(_refine_weight_sum, DataType::Float32);
+            ensure(_refine_weight_sq, DataType::Float32);
+            ensure(_refine_visits, DataType::Float32);
+        }
     }
 
     void MRNF::start_blob_seeding() {
@@ -2893,6 +3006,7 @@ namespace lfs::training {
             _rendered_count.fill_(1.0f);
         } else
             _rendered_count = lfs::core::Tensor();
+        reset_visit_buffers();
         ensure_densification_info_shape();
         _precomputed_edge_scores = lfs::core::Tensor();
         _edge_precompute_valid = false;
@@ -2937,6 +3051,10 @@ namespace lfs::training {
         }
         std::swap(_refine_weight_max, source._refine_weight_max);
         std::swap(_rendered_count, source._rendered_count);
+        std::swap(_refine_weight_sum, source._refine_weight_sum);
+        std::swap(_refine_weight_sq, source._refine_weight_sq);
+        std::swap(_refine_visits, source._refine_visits);
+        std::swap(_edge_visits, source._edge_visits);
         std::swap(_precomputed_edge_scores, source._precomputed_edge_scores);
         std::swap(_edge_precompute_valid, source._edge_precompute_valid);
         std::swap(_edge_score_sum, source._edge_score_sum);
@@ -2971,11 +3089,17 @@ namespace lfs::training {
     void MRNF::set_optimization_params(const lfs::core::param::OptimizationParameters& params) {
         const bool renderer_changed = _params && _params->gut != params.gut;
         const bool support_changed = !_params || _params->opacity_decay_rendered_only != params.opacity_decay_rendered_only;
+        const bool visit_changed = !_params || _params->growth_visit_normalize != params.growth_visit_normalize;
         auto resolved_params = params;
         resolved_params.resolve_mrnf_capacity_defaults();
         _params = std::make_unique<const lfs::core::param::OptimizationParameters>(std::move(resolved_params));
         if (renderer_changed)
             reset_exchange_state();
+        if (visit_changed && _splat_data && !_topology_frozen) {
+            reset_visit_buffers();
+            if (!params.growth_visit_normalize)
+                _edge_visits = lfs::core::Tensor();
+        }
         if ((support_changed || renderer_changed) && params.gut && params.opacity_decay_rendered_only)
             LOG_INFO("opacity_decay_rendered_only has no effect with GUT");
         if (_splat_data && (support_changed || renderer_changed)) {

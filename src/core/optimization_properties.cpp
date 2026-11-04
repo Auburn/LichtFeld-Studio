@@ -341,6 +341,60 @@ namespace lfs::core::param {
             .ui_step(1000)
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .bool_prop(&OptimizationParameters::pose_opt,
+                       "pose_opt", "Camera Pose Refinement", d.pose_opt,
+                       "Refine every training camera's pose during training (--native-fisheye standard rasterizer, with or without the rolling shutter; not --gut): a per-camera Adam step of its rotation and camera-centre offset after each of its renders; writes <output>/cameras_refined (COLMAP text, the splat's frame) and pose_refinement.tsv")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::pose_lr_deg,
+                        "pose_lr_deg", "Pose Rotation LR", d.pose_lr_deg, 0.0f, 10.0f,
+                        "Camera pose refinement: Adam step of each camera's rotation, in degrees per camera update (one update each time the camera is rendered)")
+            .precision(5)
+            .ui_step(0.001)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::pose_lr_units,
+                        "pose_lr_units", "Pose Translation LR", d.pose_lr_units, 0.0f, 10.0f,
+                        "Camera pose refinement: Adam step of each camera centre's move, in scene units per camera update")
+            .precision(6)
+            .ui_step(0.0001)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .size_prop(&OptimizationParameters::pose_opt_start,
+                       "pose_opt_start", "Pose Refinement Start", d.pose_opt_start, 0, 1000000,
+                       "Camera pose refinement: first iteration that moves the cameras")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .size_prop(&OptimizationParameters::pose_opt_hold,
+                       "pose_opt_hold", "Pose Refinement Hold", d.pose_opt_hold, 0, 1000000,
+                       "Camera pose refinement: the learning rates stay at full size until this iteration, then halve smoothly every half-life")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::pose_opt_half_life,
+                        "pose_opt_half_life", "Pose Refinement Half-life", d.pose_opt_half_life, 0.0f, 1000000.0f,
+                        "Camera pose refinement: iterations per halving of the learning rates after the hold (0 = auto: (last iteration - hold) / 7, i.e. 1/128 of the rate at the end)")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::pose_prior,
+                        "pose_prior", "Pose Prior", d.pose_prior, 0.0f, 1.0f,
+                        "Camera pose refinement: weight of the prior pulling each camera's offset (in pixels: focal x radians / x units) back to its start pose")
+            .precision(6)
+            .ui_step(0.0001)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::pose_smooth,
+                        "pose_smooth", "Pose Smoothness", d.pose_smooth, 0.0f, 1.0f,
+                        "Camera pose refinement: weight tying each camera's offset (pixels, compared in the world frame) to its time neighbours' (adjacent training images at most 12 video frames apart)")
+            .precision(6)
+            .ui_step(0.0001)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .float_prop(&OptimizationParameters::scale_reg,
                         "scale_reg", "Scale Reg", d.scale_reg, 0.0f, 1.0f,
                         "Scale regularization weight")

@@ -86,6 +86,14 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--rs-smooth", "rs_smooth", Float},
             OptimizationCliBinding{"--rs-learn-start", "rs_learn_start", Integer},
             OptimizationCliBinding{"--rs-motion-start", "rs_motion_start", Integer},
+            OptimizationCliBinding{"--pose-opt", "pose_opt", Bool},
+            OptimizationCliBinding{"--pose-lr-deg", "pose_lr_deg", Float},
+            OptimizationCliBinding{"--pose-lr-units", "pose_lr_units", Float},
+            OptimizationCliBinding{"--pose-opt-start", "pose_opt_start", Integer},
+            OptimizationCliBinding{"--pose-opt-hold", "pose_opt_hold", Integer},
+            OptimizationCliBinding{"--pose-opt-half-life", "pose_opt_half_life", Float},
+            OptimizationCliBinding{"--pose-prior", "pose_prior", Float},
+            OptimizationCliBinding{"--pose-smooth", "pose_smooth", Float},
             OptimizationCliBinding{"--growth-visit-normalize", "growth_visit_normalize", Bool},
             OptimizationCliBinding{"--growth-visit-stat", "growth_visit_stat", String, false, "; values: mean, weighted"},
             OptimizationCliBinding{"--opacity-decay-rendered-only", "opacity_decay_rendered_only", Bool},
@@ -863,6 +871,14 @@ namespace {
             ::args::ValueFlag<float> rs_smooth(training_group, "weight", lfs::core::args::optimization_cli_help("--rs-smooth"), {"rs-smooth"});
             ::args::ValueFlag<int> rs_learn_start(training_group, "iter", lfs::core::args::optimization_cli_help("--rs-learn-start"), {"rs-learn-start"});
             ::args::ValueFlag<int> rs_motion_start(training_group, "iter", lfs::core::args::optimization_cli_help("--rs-motion-start"), {"rs-motion-start"});
+            ::args::Flag pose_opt(training_group, "enabled", lfs::core::args::optimization_cli_help("--pose-opt"), {"pose-opt"});
+            ::args::ValueFlag<float> pose_lr_deg(training_group, "deg", lfs::core::args::optimization_cli_help("--pose-lr-deg"), {"pose-lr-deg"});
+            ::args::ValueFlag<float> pose_lr_units(training_group, "units", lfs::core::args::optimization_cli_help("--pose-lr-units"), {"pose-lr-units"});
+            ::args::ValueFlag<int> pose_opt_start(training_group, "iter", lfs::core::args::optimization_cli_help("--pose-opt-start"), {"pose-opt-start"});
+            ::args::ValueFlag<int> pose_opt_hold(training_group, "iter", lfs::core::args::optimization_cli_help("--pose-opt-hold"), {"pose-opt-hold"});
+            ::args::ValueFlag<float> pose_opt_half_life(training_group, "iters", lfs::core::args::optimization_cli_help("--pose-opt-half-life"), {"pose-opt-half-life"});
+            ::args::ValueFlag<float> pose_prior(training_group, "weight", lfs::core::args::optimization_cli_help("--pose-prior"), {"pose-prior"});
+            ::args::ValueFlag<float> pose_smooth(training_group, "weight", lfs::core::args::optimization_cli_help("--pose-smooth"), {"pose-smooth"});
             ::args::Flag growth_visit_normalize(training_group, "enabled", lfs::core::args::optimization_cli_help("--growth-visit-normalize"), {"growth-visit-normalize"});
             ::args::ValueFlag<std::string> growth_visit_stat(training_group, "stat", lfs::core::args::optimization_cli_help("--growth-visit-stat"), {"growth-visit-stat"});
             ::args::Flag opacity_decay_rendered_only(training_group, "enabled", lfs::core::args::optimization_cli_help("--opacity-decay-rendered-only"), {"opacity-decay-rendered-only"});
@@ -1538,6 +1554,13 @@ namespace {
             if (rs_motion_start && ::args::get(rs_motion_start) < 0) {
                 return std::unexpected("ERROR: --rs-motion-start must be >= 0");
             }
+            if ((pose_opt_start && ::args::get(pose_opt_start) < 0) || (pose_opt_hold && ::args::get(pose_opt_hold) < 0)) {
+                return std::unexpected("ERROR: --pose-opt-start and --pose-opt-hold must be >= 0");
+            }
+            for (auto* f : {&pose_lr_deg, &pose_lr_units, &pose_opt_half_life, &pose_prior, &pose_smooth}) {
+                if (*f && (!std::isfinite(::args::get(*f)) || ::args::get(*f) < 0.0f))
+                    return std::unexpected("ERROR: --pose-lr-deg, --pose-lr-units, --pose-opt-half-life, --pose-prior and --pose-smooth must be finite and >= 0");
+            }
             for (auto* f : {&rs_lr, &rs_readout_lr, &rs_prior, &rs_smooth}) {
                 if (*f && (!std::isfinite(::args::get(*f)) || ::args::get(*f) < 0.0f))
                     return std::unexpected("ERROR: --rs-lr, --rs-readout-lr, --rs-prior and --rs-smooth must be finite and >= 0");
@@ -1675,6 +1698,14 @@ namespace {
                                         rs_smooth_val = cli_option_present({"--rs-smooth"}) ? std::optional<float>(::args::get(rs_smooth)) : std::optional<float>(),
                                         rs_learn_start_val = cli_option_present({"--rs-learn-start"}) ? std::optional<int>(::args::get(rs_learn_start)) : std::optional<int>(),
                                         rs_motion_start_val = cli_option_present({"--rs-motion-start"}) ? std::optional<int>(::args::get(rs_motion_start)) : std::optional<int>(),
+                                        pose_opt_flag = bool(pose_opt),
+                                        pose_lr_deg_val = cli_option_present({"--pose-lr-deg"}) ? std::optional<float>(::args::get(pose_lr_deg)) : std::optional<float>(),
+                                        pose_lr_units_val = cli_option_present({"--pose-lr-units"}) ? std::optional<float>(::args::get(pose_lr_units)) : std::optional<float>(),
+                                        pose_opt_start_val = cli_option_present({"--pose-opt-start"}) ? std::optional<int>(::args::get(pose_opt_start)) : std::optional<int>(),
+                                        pose_opt_hold_val = cli_option_present({"--pose-opt-hold"}) ? std::optional<int>(::args::get(pose_opt_hold)) : std::optional<int>(),
+                                        pose_opt_half_life_val = cli_option_present({"--pose-opt-half-life"}) ? std::optional<float>(::args::get(pose_opt_half_life)) : std::optional<float>(),
+                                        pose_prior_val = cli_option_present({"--pose-prior"}) ? std::optional<float>(::args::get(pose_prior)) : std::optional<float>(),
+                                        pose_smooth_val = cli_option_present({"--pose-smooth"}) ? std::optional<float>(::args::get(pose_smooth)) : std::optional<float>(),
                                         growth_visit_normalize_flag = bool(growth_visit_normalize),
                                         growth_visit_stat_val = cli_option_present({"--growth-visit-stat"}) ? std::optional<std::string>(::args::get(growth_visit_stat)) : std::optional<std::string>(),
                                         steps_scaler_val = cli_option_present({"--steps-scaler"}) ? std::optional<float>(::args::get(steps_scaler)) : std::optional<float>(),
@@ -1884,6 +1915,17 @@ namespace {
                     opt.rs_learn_start = static_cast<size_t>(*rs_learn_start_val);
                 if (rs_motion_start_val)
                     opt.rs_motion_start = static_cast<size_t>(*rs_motion_start_val);
+                if (pose_opt_flag)
+                    opt.pose_opt = true;
+                setVal(pose_lr_deg_val, opt.pose_lr_deg);
+                setVal(pose_lr_units_val, opt.pose_lr_units);
+                if (pose_opt_start_val)
+                    opt.pose_opt_start = static_cast<size_t>(*pose_opt_start_val);
+                if (pose_opt_hold_val)
+                    opt.pose_opt_hold = static_cast<size_t>(*pose_opt_hold_val);
+                setVal(pose_opt_half_life_val, opt.pose_opt_half_life);
+                setVal(pose_prior_val, opt.pose_prior);
+                setVal(pose_smooth_val, opt.pose_smooth);
                 if (growth_visit_normalize_flag)
                     opt.growth_visit_normalize = true;
                 setVal(growth_visit_stat_val, opt.growth_visit_stat);
@@ -2073,6 +2115,14 @@ namespace {
                 note_opt("rs_smooth", rs_smooth_val.has_value());
                 note_opt("rs_learn_start", rs_learn_start_val.has_value());
                 note_opt("rs_motion_start", rs_motion_start_val.has_value());
+                note_opt("pose_opt", pose_opt_flag);
+                note_opt("pose_lr_deg", pose_lr_deg_val.has_value());
+                note_opt("pose_lr_units", pose_lr_units_val.has_value());
+                note_opt("pose_opt_start", pose_opt_start_val.has_value());
+                note_opt("pose_opt_hold", pose_opt_hold_val.has_value());
+                note_opt("pose_opt_half_life", pose_opt_half_life_val.has_value());
+                note_opt("pose_prior", pose_prior_val.has_value());
+                note_opt("pose_smooth", pose_smooth_val.has_value());
                 note_opt("growth_visit_normalize", growth_visit_normalize_flag);
                 note_opt("growth_visit_stat", growth_visit_stat_val.has_value());
                 note_opt("opacity_decay_rendered_only", opacity_decay_rendered_only_flag || no_opacity_decay_rendered_only_flag);

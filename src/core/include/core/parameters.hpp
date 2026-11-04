@@ -333,6 +333,21 @@ namespace lfs::core {
             // > rs_learn_start with both the readout and motion learned: the readout until then, the motion after (0 = both
             // from rs_learn_start; they trade off: a longer readout with slower motion draws the same frame)
             size_t rs_motion_start = 0;
+            // Per-camera pose refinement (standard rasterizer, --native-fisheye only, with or without the rolling shutter;
+            // training/pose_refinement.hpp): every training camera's pose gets an offset (rotation, camera-centre move)
+            // refined by a per-camera Adam step after its backward, pose_lr_deg degrees and pose_lr_units scene units per
+            // camera update, from pose_opt_start, held to pose_opt_hold, then halving smoothly every pose_opt_half_life
+            // iterations (0 = auto: 1/128 of the rate by the last iteration); pose_prior |q|^2 to the start and pose_smooth
+            // |q - q_neighbour|^2 to the time neighbours (q = the offset in pixels: focal x (radians, units)). The refined
+            // cameras go to <output>/cameras_refined (COLMAP text, the exported splat's frame) and pose_refinement.tsv.
+            bool pose_opt = false;
+            float pose_lr_deg = 0.01f;
+            float pose_lr_units = 0.0005f;
+            size_t pose_opt_start = 3'000;
+            size_t pose_opt_hold = 15'000;
+            float pose_opt_half_life = 0.0f;
+            float pose_prior = 0.0f;
+            float pose_smooth = 0.0f;
             float scale_reg = 0.01f;
             float scale_reg_decay_power = -1.0f;
             float erank_reg = 0.0f;

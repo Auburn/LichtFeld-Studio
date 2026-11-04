@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <stdexcept>
 
 namespace {
     std::atomic_bool g_force_generic_preprocess_for_testing{false};
@@ -81,7 +82,10 @@ void fast_lfs::rasterization::backward(
     cudaStream_t stream,
     const FastGSLens& lens,
     const FastGSDistortion& distortion,
-    const FastGSRollingShutter& rs) {
+    const FastGSRollingShutter& rs,
+    float* pose_grad) {
+    if (pose_grad != nullptr && lens.model != kLensFisheye)
+        throw std::runtime_error("FastGS backward: the pose gradient (--pose-opt) is implemented for the native fisheye lens only");
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const uint64_t n_tiles_u64 = static_cast<uint64_t>(grid.x) * static_cast<uint64_t>(grid.y);
     const int n_tiles = checked_to_int(n_tiles_u64, "n_tiles exceeds int range");
@@ -202,8 +206,8 @@ void fast_lfs::rasterization::backward(
     float clip_left, clip_right, clip_top, clip_bottom;
     ewa_clip_bounds(w_f, h_f, fx, fy, cx, cy, clip_left, clip_right, clip_top, clip_bottom);
     if (n_primitives > 0) {
-        auto launch_preprocess_backward_lens = [&]<bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES, bool FISHEYE, bool RS>() {
-            kernels::backward::preprocess_backward_cu<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, FISHEYE, RS><<<div_round_up(n_primitives, config::block_size_preprocess_backward), config::block_size_preprocess_backward, 0, stream>>>(
+        auto launch_preprocess_backward_lens = [&]<bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES, bool FISHEYE, bool RS, bool POSE>() {
+            kernels::backward::preprocess_backward_cu<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, FISHEYE, RS, POSE><<<div_round_up(n_primitives, config::block_size_preprocess_backward), config::block_size_preprocess_backward, 0, stream>>>(
                 means,
                 scales_raw,
                 rotations_raw,
@@ -240,16 +244,23 @@ void fast_lfs::rasterization::backward(
                 lens,
                 distortion.moments != nullptr ? distortion.grad_depths : nullptr,
                 distortion.depth_mode,
-                rs);
+                rs,
+                pose_grad);
             LFS_CUDA_LAUNCH_CHECK(stream, "fastgs.backward.preprocess_backward");
         };
         auto launch_preprocess_backward = [&]<bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES>() {
-            if (lens.model == kLensFisheye && rs.motion != nullptr)
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true>();
+            // --pose-opt: the POSE variants (native fisheye, with or without the rolling shutter) only when the pose
+            // gradient is bound; otherwise exactly the kernels as before
+            if (pose_grad != nullptr && rs.motion != nullptr)
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, true>();
+            else if (pose_grad != nullptr)
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, false, true>();
+            else if (lens.model == kLensFisheye && rs.motion != nullptr)
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, false>();
             else if (lens.model == kLensFisheye)
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, false>();
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, false, false>();
             else
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, false, false>();
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, false, false, false>();
         };
         const bool disabled_features = fused_adam.erank_reg_weight <= 0.0f &&
                                        fused_adam.dc_reg_weight <= 0.0f &&

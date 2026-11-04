@@ -662,6 +662,7 @@ add_executable(${PROJECT_NAME}
     src/app/lfe_genloss_tool.cpp
     src/app/lfe_lossweight_tool.cpp
     src/app/lfe_rs_tool.cpp
+    src/app/lfe_pose_tool.cpp
     resources/lichtfeld-studio.rc
     resources/lichtfeld-studio.manifest
 )

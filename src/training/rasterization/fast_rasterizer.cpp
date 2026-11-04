@@ -414,7 +414,8 @@ namespace lfs::training {
         bool update_screen_share,
         const FastGSDistortionOptions& distortion_options,
         int screen_share_axis,
-        const fast_lfs::rasterization::FastGSRollingShutter& rolling_shutter) {
+        const fast_lfs::rasterization::FastGSRollingShutter& rolling_shutter,
+        const fast_lfs::rasterization::FastGSPose& pose) {
         // Get camera parameters
         const int full_width = viewpoint_camera.image_width();
         const int full_height = viewpoint_camera.image_height();
@@ -446,9 +447,20 @@ namespace lfs::training {
         constexpr float near_plane = 0.01f;
         constexpr float far_plane = 1e10f;
 
-        // Get direct GPU pointers (tensors are already contiguous on CUDA)
-        const float* w2c_ptr = viewpoint_camera.world_view_transform_ptr();
-        const float* cam_position_ptr = viewpoint_camera.cam_position_ptr();
+        // Get direct GPU pointers (tensors are already contiguous on CUDA). --pose-opt: the refined transform and centre
+        // (device buffers composed on this stream) replace the camera's own.
+        const bool pose_override = pose.w2c != nullptr && pose.cam_position != nullptr;
+        if (pose.grad != nullptr && fastgs_lens_for_camera(viewpoint_camera).model != fast_lfs::rasterization::kLensFisheye) {
+            return std::unexpected(lfs::make_error(lfs::ErrorInit{
+                .code = lfs::ErrorCode::InvalidArgument,
+                .domain = lfs::ErrorDomain::Rendering,
+                .user_message = "The pose gradient (--pose-opt) needs the native fisheye lens.",
+                .detail = "FastGSPose.grad bound for a non-fisheye camera",
+                .detection = LFS_SOURCE_SITE_CURRENT(),
+            }));
+        }
+        const float* w2c_ptr = pose_override ? pose.w2c : viewpoint_camera.world_view_transform_ptr();
+        const float* cam_position_ptr = pose_override ? pose.cam_position : viewpoint_camera.cam_position_ptr();
 
         const int n_primitives = checked_dim_to_int(means.shape()[0], "n_primitives");
         if (n_primitives == 0) {
@@ -707,6 +719,8 @@ namespace lfs::training {
         // the arena frame active.
         FastRasterizeContext ctx;
         ctx.set_forward_context(forward_ctx);
+        // --pose-opt: the backward adds the pose gradient here (null = off: the unchanged kernels)
+        ctx.forward_ctx.pose_grad = pose.grad;
 
         // Prepare render output
         RenderOutput render_output;

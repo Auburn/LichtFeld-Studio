@@ -3408,6 +3408,36 @@ namespace lfs::training {
                 LOG_INFO("{}", rolling_shutter_->description());
             }
 
+            // Per-camera pose refinement (--pose-opt; native fisheye standard rasterizer only, with or without the RS)
+            pose_refinement_.reset();
+            pose_refinement_exported_ = false;
+            if (params.optimization.pose_opt) {
+                if (params.optimization.gut)
+                    return std::unexpected("--pose-opt is implemented for the standard rasterizer's native fisheye path "
+                                           "(--native-fisheye), not for --gut; drop --gut or --pose-opt");
+                if (!params.optimization.native_fisheye)
+                    return std::unexpected("--pose-opt needs --native-fisheye (the standard rasterizer's native fisheye path)");
+                PoseRefinementSettings pose_settings;
+                pose_settings.lr_deg = params.optimization.pose_lr_deg;
+                pose_settings.lr_units = params.optimization.pose_lr_units;
+                pose_settings.start = static_cast<int>(params.optimization.pose_opt_start);
+                pose_settings.hold_until = static_cast<int>(std::max(params.optimization.pose_opt_hold, params.optimization.pose_opt_start));
+                pose_settings.half_life = params.optimization.pose_opt_half_life;
+                pose_settings.iterations = static_cast<int>(params.optimization.iterations);
+                pose_settings.prior = params.optimization.pose_prior;
+                pose_settings.smooth = params.optimization.pose_smooth;
+                if (const char* snap = std::getenv("LFS_POSE_SNAPSHOTS"); snap != nullptr && *snap && *snap != '0')
+                    pose_settings.snapshot_dir = params.dataset.output_path / "pose_snapshots";
+                if (pose_settings.start >= pose_settings.iterations)
+                    LOG_WARN("--pose-opt: the start ({}) is not before the last iteration ({}); the cameras will not move",
+                             pose_settings.start, pose_settings.iterations);
+                auto created = CameraPoseRefinement::create(pose_settings, train_dataset_->get_cameras());
+                if (!created)
+                    return std::unexpected(created.error());
+                pose_refinement_ = std::move(*created);
+                LOG_INFO("{}", pose_refinement_->description());
+            }
+
             // Initialize background color tensor from params
             {
                 const auto& bg_color = params.optimization.bg_color;
@@ -7241,6 +7271,12 @@ namespace lfs::training {
                                         *cam, iter,
                                         lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
                                                                           : strategy_->get_model().means().stream());
+                                fast_lfs::rasterization::FastGSPose pose_options{};
+                                if (pose_refinement_) // the camera's refined transform (composed on the device) + its gradient buffer
+                                    pose_options = pose_refinement_->options_for(
+                                        *cam, iter,
+                                        lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
+                                                                          : strategy_->get_model().means().stream());
                                 auto rasterize_result = fast_rasterize_forward(
                                     *cam, strategy_->get_model(), bg,
                                     0, 0, 0, 0,
@@ -7248,7 +7284,7 @@ namespace lfs::training {
                                     render_normal, render_depth,
                                     1.0f, true, distortion_options,
                                     screen_share_axis_code(step_params),
-                                    rolling_shutter_options);
+                                    rolling_shutter_options, pose_options);
                                 if (rasterize_result) {
                                     output = std::move(rasterize_result->first);
                                     fast_ctx.emplace(std::move(rasterize_result->second));
@@ -8496,6 +8532,10 @@ namespace lfs::training {
                                         rolling_shutter_->step(*cam, iter,
                                                                lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
                                                                                                  : strategy_->get_model().means().stream());
+                                    if (pose_refinement_) // the camera's pose Adam step (device; no-op outside its schedule)
+                                        pose_refinement_->step(*cam, iter,
+                                                               lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
+                                                                                                 : strategy_->get_model().means().stream());
                                     if (fused_extra_gradients.edge_score_out != nullptr) {
                                         strategy_->on_edge_score_accumulated(iter);
                                     }
@@ -8675,6 +8715,27 @@ namespace lfs::training {
                         std::string rs_error;
                         if (!rolling_shutter_->save(params_.dataset.output_path / "rs_motion_learned.txt", rs_stream, rs_error))
                             LOG_ERROR("rolling shutter: {}", rs_error);
+                    }
+                    if (pose_refinement_) {
+                        const cudaStream_t pose_stream = lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
+                                                                                           : strategy_->get_model().means().stream();
+                        const bool last = iter >= get_total_iterations();
+                        // synchronous readback at this cadence only
+                        if (pose_refinement_->active(iter) &&
+                            (iter % pose_refinement_->settings().log_every == 0 || last))
+                            LOG_INFO("iter {}: {}", iter, pose_refinement_->summary(iter, pose_stream));
+                        if (last && !pose_refinement_exported_) {
+                            pose_refinement_exported_ = true;
+                            std::vector<std::string> pose_report;
+                            std::string pose_error;
+                            if (pose_refinement_->export_results(params_.dataset.output_path, params_.dataset.data_path, pose_stream,
+                                                                 pose_report, pose_error)) {
+                                for (const auto& line : pose_report)
+                                    LOG_INFO("{}", line);
+                            } else {
+                                LOG_ERROR("pose refinement export failed: {}", pose_error);
+                            }
+                        }
                     }
 
                     if (!in_popspa && bilateral_grid_ && step_params.bilateral_grid_active()) {

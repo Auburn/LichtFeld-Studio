@@ -234,7 +234,11 @@ namespace lfs::training {
         int screen_share_axis = 0,
         // Dynamic rolling shutter (native fisheye; FastGSRollingShutter): device pointers to this camera's motion and the
         // readout (training/rolling_shutter_motion.hpp makes them). Default: off, the unchanged kernels.
-        const fast_lfs::rasterization::FastGSRollingShutter& rolling_shutter = {});
+        const fast_lfs::rasterization::FastGSRollingShutter& rolling_shutter = {},
+        // --pose-opt (native fisheye; FastGSPose): a refined world-to-camera transform and centre drawn in place of the
+        // camera's own, and the buffer the backward adds the pose gradient to (training/pose_refinement.hpp makes them).
+        // Default: the camera's own transform, no pose gradient (the unchanged kernels).
+        const fast_lfs::rasterization::FastGSPose& pose = {});
 
     // Backward pass with optional extra alpha gradient for masked training
     void fast_rasterize_backward(

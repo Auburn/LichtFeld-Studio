@@ -32,6 +32,19 @@ namespace fast_lfs::rasterization {
         float far_plane;
     };
 
+    // Per-camera pose refinement (2026-11-04; --pose-opt, native fisheye only; training/pose_refinement.hpp). The trainer
+    // hands the rasterizer a REFINED world-to-camera matrix and camera centre in place of the camera's own
+    // (fast_rasterize_forward's pose argument), so the forward kernels are unchanged. When grad is bound the preprocess
+    // backward adds, summed over the splats, dL/d(dr, dd) of a left perturbation of the transform it was given,
+    // W(delta) = exp(-[dr]x) W, b(delta) = exp(-[dr]x) (b - dd) (camera axes; dr in radians, dd the centre's move in scene
+    // units), through every splat's centre, covariance, depth, distortion depth and normal (at its rolling-shutter time,
+    // held) and its colour's view direction (centre c + W^T dd). See pose_gradient.cuh.
+    struct FastGSPose {
+        const float* w2c = nullptr;          // device [16] row-major; null = the camera's own transform
+        const float* cam_position = nullptr; // device [3], required with w2c
+        float* grad = nullptr;               // device [6] optional: dL/d(dr, dd) is added (caller zeros)
+    };
+
     struct ForwardContext {
         void* per_primitive_buffers = nullptr;
         void* per_tile_buffers = nullptr;
@@ -53,6 +66,9 @@ namespace fast_lfs::rasterization {
         // Dynamic rolling shutter the forward drew with (off unless rs.motion != nullptr); the backward uses the same
         // per-splat poses and, when rs.grad is bound, adds dL/d(motion, readout).
         FastGSRollingShutter rs{};
+        // --pose-opt: device [6] the backward adds dL/d(left perturbation of the w2c) to (null = off; FastGSPose). Set by
+        // the caller after the forward (fast_rasterize_forward from its pose argument); native fisheye only.
+        float* pose_grad = nullptr;
         uint64_t frame_id = 0;
         // The stream all of this context's kernels/allocations are ordered on;
         // releases (sorted indices, arena frame, helper buffers) must use it.

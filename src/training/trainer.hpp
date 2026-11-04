@@ -26,6 +26,7 @@
 #include "metrics/metrics.hpp"
 #include "optimizer/scheduler.hpp"
 #include "progress.hpp"
+#include "pose_refinement.hpp"
 #include "rolling_shutter_motion.hpp"
 #include "project_snapshot_chapters.hpp"
 #include "strategies/istrategy.hpp"
@@ -1076,6 +1077,9 @@ namespace lfs::training {
         std::unordered_map<int, LossWeightMap> loss_weight_maps_;
         // --rolling-shutter: the dynamic rolling shutter's per-camera motion and readout (rolling_shutter_motion.hpp); null = off
         std::unique_ptr<RollingShutterMotion> rolling_shutter_;
+        // --pose-opt: per-camera pose refinement (pose_refinement.hpp); null = off. Exported once at the last iteration.
+        std::unique_ptr<CameraPoseRefinement> pose_refinement_;
+        bool pose_refinement_exported_ = false;
         core::Tensor loss_weight_source_;
         core::Tensor loss_weight_map_;
         core::Tensor loss_weight_combined_;

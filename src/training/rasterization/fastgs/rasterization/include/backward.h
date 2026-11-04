@@ -70,6 +70,8 @@ namespace fast_lfs::rasterization {
         cudaStream_t stream,
         const FastGSLens& lens = {},
         const FastGSDistortion& distortion = {},
-        const FastGSRollingShutter& rs = {});
+        const FastGSRollingShutter& rs = {},
+        // --pose-opt: device [6], dL/d(left perturbation of w2c) is added (null = off; native fisheye only)
+        float* pose_grad = nullptr);
 
 } // namespace fast_lfs::rasterization

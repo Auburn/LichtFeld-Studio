@@ -692,7 +692,8 @@ namespace fast_lfs::rasterization {
                 stream,
                 forward_ctx.lens,
                 forward_ctx.distortion,
-                forward_ctx.rs);
+                forward_ctx.rs,
+                forward_ctx.pose_grad);
 
             // Mark frame as complete
             release_forward_context(forward_ctx);

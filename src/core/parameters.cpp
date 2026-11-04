@@ -575,6 +575,9 @@ namespace lfs::core {
             distortion_start = apply(distortion_start);
             rs_learn_start = apply(rs_learn_start);
             rs_motion_start = apply(rs_motion_start);
+            pose_opt_start = apply(pose_opt_start);
+            pose_opt_hold = apply(pose_opt_hold);
+            pose_opt_half_life = pose_opt_half_life * ratio;
 
             for (auto* steps : {&eval_steps, &save_steps}) {
                 std::set<size_t> unique;
@@ -927,6 +930,12 @@ namespace lfs::core {
                 return std::format("rs_learn_start must be within [0, {}] (got {})", MAX_ITERATION_VALUE, rs_learn_start);
             if (rs_motion_start > MAX_ITERATION_VALUE)
                 return std::format("rs_motion_start must be within [0, {}] (got {})", MAX_ITERATION_VALUE, rs_motion_start);
+            if (!std::isfinite(pose_lr_deg) || pose_lr_deg < 0.0f || !std::isfinite(pose_lr_units) || pose_lr_units < 0.0f ||
+                !std::isfinite(pose_opt_half_life) || pose_opt_half_life < 0.0f || !std::isfinite(pose_prior) || pose_prior < 0.0f ||
+                !std::isfinite(pose_smooth) || pose_smooth < 0.0f)
+                return "pose_lr_deg, pose_lr_units, pose_opt_half_life, pose_prior and pose_smooth must be finite and nonnegative";
+            if (pose_opt_start > MAX_ITERATION_VALUE || pose_opt_hold > MAX_ITERATION_VALUE)
+                return std::format("pose_opt_start and pose_opt_hold must be within [0, {}]", MAX_ITERATION_VALUE);
             if (growth_visit_stat != "mean" && growth_visit_stat != "weighted")
                 return std::format("growth_visit_stat must be 'mean' or 'weighted' (got '{}')", growth_visit_stat);
             if (max_cap < 0)

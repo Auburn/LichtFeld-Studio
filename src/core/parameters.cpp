@@ -1090,6 +1090,12 @@ namespace lfs::core {
             }
             if (ppisp_freeze_from_sidecar && !use_ppisp)
                 return "PPISP sidecar freeze requires PPISP enabled";
+            if (ppisp_lock_frames && !use_ppisp)
+                return "--ppisp-lock-frames requires --ppisp (and --no-exposure-correction)";
+            if (ppisp_lock_colour && !use_ppisp)
+                return "--ppisp-lock-colour requires --ppisp (and --no-exposure-correction)";
+            if (!std::isfinite(ppisp_reg_weight) || ppisp_reg_weight < 0.0f || ppisp_reg_weight > 1000.0f)
+                return std::format("ppisp_reg_weight must be within [0, 1000] (got {})", ppisp_reg_weight);
             if (depth_loss_mode != "ssi" && depth_loss_mode != "ssi-disparity" && depth_loss_mode != "ssi-depth")
                 return "depth_loss_mode must be 'ssi', 'ssi-disparity', or 'ssi-depth'";
             if (normal_loss_space != NormalLossSpace::Auto &&

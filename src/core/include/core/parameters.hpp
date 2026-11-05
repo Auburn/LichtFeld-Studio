@@ -423,6 +423,13 @@ namespace lfs::core {
             float ppisp_reg_weight = 0.001f;
             int ppisp_warmup_steps = 500;
             bool ppisp_freeze_from_sidecar = false;
+            // --ppisp-lock-frames (LFQ): per-frame exposure and per-frame colour latents stay at their initial values
+            // (identity unless EXIF-seeded): no Adam step, no mean projection. Per-camera vignetting and CRF still train.
+            bool ppisp_lock_frames = false;
+            // --ppisp-lock-colour (LFQ): only the per-frame colour latents (white point + the three primaries, i.e. the
+            // per-frame white balance / colour correction) stay at identity = the footage as shot: no Adam step. Per-frame
+            // exposure, per-camera vignetting and CRF train exactly as without the flag.
+            bool ppisp_lock_colour = false;
             std::filesystem::path ppisp_sidecar_path = {};
             PPISPHoldoutAppearance ppisp_holdout_appearance = PPISPHoldoutAppearance::Nearest;
             bool ppisp_use_controller = false;

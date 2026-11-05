@@ -131,6 +131,9 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--no-ppisp-exif-exposure", "ppisp_exposure_from_exif", Bool, true},
             OptimizationCliBinding{"--ppisp-controller", "ppisp_use_controller", Bool},
             OptimizationCliBinding{"--ppisp-freeze", "ppisp_freeze_from_sidecar", Bool},
+            OptimizationCliBinding{"--ppisp-lock-frames", "ppisp_lock_frames", Bool},
+            OptimizationCliBinding{"--ppisp-lock-colour", "ppisp_lock_colour", Bool},
+            OptimizationCliBinding{"--ppisp-reg-weight", "ppisp_reg_weight", Float},
             OptimizationCliBinding{"--gut", "gut", Bool},
             OptimizationCliBinding{"--eval", "enable_eval", Bool},
             OptimizationCliBinding{"--eval-all", "eval_all", Bool},
@@ -975,6 +978,9 @@ namespace {
             ::args::Flag no_ppisp_exif_exposure(rendering_group, "no_ppisp_exif_exposure", lfs::core::args::optimization_cli_help("--no-ppisp-exif-exposure"), {"no-ppisp-exif-exposure"});
             ::args::Flag ppisp_controller(rendering_group, "ppisp_controller", lfs::core::args::optimization_cli_help("--ppisp-controller"), {"ppisp-controller"});
             ::args::Flag ppisp_freeze_from_sidecar(rendering_group, "ppisp_freeze", lfs::core::args::optimization_cli_help("--ppisp-freeze"), {"ppisp-freeze"});
+            ::args::Flag ppisp_lock_frames(rendering_group, "ppisp_lock_frames", lfs::core::args::optimization_cli_help("--ppisp-lock-frames"), {"ppisp-lock-frames"});
+            ::args::Flag ppisp_lock_colour(rendering_group, "ppisp_lock_colour", lfs::core::args::optimization_cli_help("--ppisp-lock-colour"), {"ppisp-lock-colour"});
+            ::args::ValueFlag<float> ppisp_reg_weight(rendering_group, "w", lfs::core::args::optimization_cli_help("--ppisp-reg-weight"), {"ppisp-reg-weight"});
             ::args::ValueFlag<std::string> ppisp_sidecar_path(rendering_group, "path", "Path to PPISP sidecar (.ppisp) used for frozen PPISP training", {"ppisp-sidecar"});
             ::args::Flag gut(rendering_group, "gut", lfs::core::args::optimization_cli_help("--gut"), {"gut"});
 
@@ -1724,6 +1730,9 @@ namespace {
                                         no_ppisp_exif_exposure_flag = bool(no_ppisp_exif_exposure),
                                         ppisp_controller_flag = bool(ppisp_controller),
                                         ppisp_freeze_from_sidecar_flag = bool(ppisp_freeze_from_sidecar),
+                                        ppisp_lock_frames_flag = bool(ppisp_lock_frames),
+                                        ppisp_lock_colour_flag = bool(ppisp_lock_colour),
+                                        ppisp_reg_weight_val = cli_option_present({"--ppisp-reg-weight"}) ? std::optional<float>(::args::get(ppisp_reg_weight)) : std::optional<float>(),
                                         ppisp_sidecar_path_val = cli_option_present({"--ppisp-sidecar"}) ? std::optional<std::string>(::args::get(ppisp_sidecar_path)) : std::optional<std::string>(),
                                         enable_eval_flag = bool(enable_eval),
                                         eval_all_flag = bool(eval_all),
@@ -1936,6 +1945,9 @@ namespace {
                     opt.ppisp_exposure_from_exif = false;
                 setFlag(ppisp_controller_flag, opt.ppisp_use_controller);
                 setFlag(ppisp_freeze_from_sidecar_flag, opt.ppisp_freeze_from_sidecar);
+                setFlag(ppisp_lock_frames_flag, opt.ppisp_lock_frames);
+                setFlag(ppisp_lock_colour_flag, opt.ppisp_lock_colour);
+                setVal(ppisp_reg_weight_val, opt.ppisp_reg_weight);
                 if (ppisp_sidecar_path_val) {
                     opt.ppisp_sidecar_path = lfs::core::utf8_to_path(*ppisp_sidecar_path_val);
                 }
@@ -2101,6 +2113,9 @@ namespace {
                                           ppisp_freeze_from_sidecar_flag);
                 note_opt("ppisp_use_controller", ppisp_controller_flag);
                 note_opt("ppisp_freeze_from_sidecar", ppisp_freeze_from_sidecar_flag);
+                note_opt("ppisp_lock_frames", ppisp_lock_frames_flag);
+                note_opt("ppisp_lock_colour", ppisp_lock_colour_flag);
+                note_opt("ppisp_reg_weight", ppisp_reg_weight_val.has_value());
                 note_opt("ppisp_sidecar_path", ppisp_sidecar_path_val.has_value());
                 note_opt("enable_eval", enable_eval_flag || eval_all_flag);
                 note_opt("eval_all", eval_all_flag);

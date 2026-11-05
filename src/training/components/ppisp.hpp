@@ -7,7 +7,9 @@
 #include <cassert>
 #include <cmath>
 #include <expected>
+#include <filesystem>
 #include <istream>
+#include <string>
 #include <optional>
 #include <ostream>
 #include <unordered_map>
@@ -93,6 +95,26 @@ namespace lfs::training {
         [[nodiscard]] std::optional<float> exif_exposure_mean() const { return exif_exposure_mean_; }
         void set_train_crf(bool train) { config_.train_crf = train; }
         [[nodiscard]] bool train_crf() const { return config_.train_crf; }
+
+        /// --ppisp-lock-frames (LFQ): per-frame exposure and colour latents keep their current values (identity
+        /// unless EXIF-seeded): optimizer_step() skips their Adam groups and project_mean() leaves them alone.
+        /// Per-camera vignetting and CRF are unaffected. Not part of the serialized config (kept across
+        /// adopt_checkpoint_state); the trainer sets it from the parameters at initialisation.
+        void set_lock_frames(bool lock) { lock_frames_ = lock; }
+        [[nodiscard]] bool lock_frames() const { return lock_frames_; }
+
+        /// --ppisp-lock-colour (LFQ): only the per-frame colour latents (white point + primaries) keep their current
+        /// values (identity = the footage as shot): optimizer_step() skips their Adam group. Per-frame exposure (its
+        /// Adam step and, with exposure correction, its mean projection), vignetting and CRF are unaffected. Not part of
+        /// the serialized config; the trainer sets it from the parameters at initialisation.
+        void set_lock_colour(bool lock) { lock_colour_ = lock; }
+        [[nodiscard]] bool lock_colour() const { return lock_colour_; }
+
+        /// Plain-text dump of every learned PPISP parameter (raw values as stored), for offline analysis (LFQ).
+        /// frame_names: image name per registered frame UID (missing names are written as "?").
+        [[nodiscard]] std::expected<void, std::string> write_text_dump(
+            const std::filesystem::path& path, const std::unordered_map<int, std::string>& frame_names,
+            const std::string& mode, int iteration) const;
 
         /// Per-frame exposure in EV (same units as the optimiser).
         [[nodiscard]] lfs::core::Tensor& exposure_params() { return exposure_params_; }
@@ -321,6 +343,8 @@ namespace lfs::training {
         std::unordered_map<int, int> uid_to_frame_idx_;
         std::unordered_map<int, int> uid_to_camera_id_;
         bool finalized_ = false;
+        bool lock_frames_ = false; // --ppisp-lock-frames: never step or project per-frame exposure/colour
+        bool lock_colour_ = false; // --ppisp-lock-colour: never step the per-frame colour latents (exposure still trains)
         std::optional<float> exif_exposure_mean_;
 
         // ZCA pinv block-diagonal matrix for color mean regularization [8x8]

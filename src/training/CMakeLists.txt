@@ -18,6 +18,7 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/generated_view_loss.cu
     kernels/loss_weight_map.cu
     kernels/rolling_shutter_update.cu
+    kernels/bg_cubemap.cu
     kernels/ssim.cu
     kernels/l1_loss.cu
     kernels/ssim_reduction.cu
@@ -129,6 +130,7 @@ set(TRAINING_NEW_SOURCES
         training_cropbox_mask.cpp
         trainer.cpp
         rolling_shutter_motion.cpp
+        bg_cubemap.cpp
         trainer_popspa.cpp
         normal_auto_generate.cpp
         vram_ledger.cpp

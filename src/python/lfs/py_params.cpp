@@ -917,7 +917,8 @@ namespace lfs::python {
             .value("SOLID_COLOR", BackgroundMode::SolidColor)
             .value("MODULATION", BackgroundMode::Modulation)
             .value("IMAGE", BackgroundMode::Image)
-            .value("RANDOM", BackgroundMode::Random);
+            .value("RANDOM", BackgroundMode::Random)
+            .value("CUBEMAP", BackgroundMode::Cubemap);
 
         nb::class_<PyOptimizationParams>(m, "OptimizationParams")
             .def(nb::init<>())

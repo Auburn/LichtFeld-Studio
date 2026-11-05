@@ -193,7 +193,8 @@ namespace lfs::core {
             SolidColor, // Use bg_color RGB values
             Modulation, // Sinusoidal background modulation
             Image,      // Use custom background image
-            Random      // Random per-pixel colors each iteration
+            Random,     // Random per-pixel colors each iteration
+            Cubemap     // LFC: a learned environment cubemap (initialised to bg_color), sampled per pixel ray
         };
 
         inline constexpr std::string_view kStrategyMCMC = "mcmc";
@@ -396,6 +397,14 @@ namespace lfs::core {
             BackgroundMode bg_mode = BackgroundMode::SolidColor; // Which background mode to use
             std::array<float, 3> bg_color = {0.0f, 0.0f, 0.0f};  // RGB background color [0-1]
             std::filesystem::path bg_image_path = {};            // Custom background image path
+            // --bg-mode cubemap (LFC): learned background cubemap, 6 x res x res RGB texels (init bg_color), drawn per
+            // pixel through the camera's lens and rolling-shutter row pose, trained by the photometric loss through the
+            // appearance model; own Adam (lr decaying exponentially to lr * lr_final at the last iteration) and an
+            // optional smoothness term (mean squared difference of neighbouring texels, weight smooth). <output>/bg_cubemap.
+            int bg_cubemap_res = 256;
+            float bg_cubemap_lr = 2e-3f;
+            float bg_cubemap_lr_final = 0.1f;
+            float bg_cubemap_smooth = 1.0f;
 
             // Bilateral grid parameters
             bool use_bilateral_grid = false;

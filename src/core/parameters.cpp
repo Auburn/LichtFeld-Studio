@@ -1106,6 +1106,16 @@ namespace lfs::core {
                 return std::format(
                     "normal_start_fraction must not exceed normal_end_fraction ({} > {})",
                     normal_start_fraction, normal_end_fraction);
+            if (bg_cubemap_res < 4 || bg_cubemap_res > 4096)
+                return std::format("bg_cubemap_res must be within [4, 4096] (got {})", bg_cubemap_res);
+            if (auto error = invalid_nonnegative(bg_cubemap_lr, "bg_cubemap_lr"); !error.empty())
+                return error;
+            if (auto error = invalid_probability(bg_cubemap_lr_final, "bg_cubemap_lr_final"); !error.empty())
+                return error;
+            if (auto error = invalid_nonnegative(bg_cubemap_smooth, "bg_cubemap_smooth"); !error.empty())
+                return error;
+            if (bg_mode == BackgroundMode::Cubemap && gut)
+                return "--bg-mode cubemap needs the standard rasterizer (not --gut)";
             return {};
         }
 

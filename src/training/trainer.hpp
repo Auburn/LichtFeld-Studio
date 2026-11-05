@@ -27,6 +27,7 @@
 #include "optimizer/scheduler.hpp"
 #include "progress.hpp"
 #include "rolling_shutter_motion.hpp"
+#include "bg_cubemap.hpp"
 #include "project_snapshot_chapters.hpp"
 #include "strategies/istrategy.hpp"
 #include "training_cropbox_mask.hpp"
@@ -1076,6 +1077,9 @@ namespace lfs::training {
         std::unordered_map<int, LossWeightMap> loss_weight_maps_;
         // --rolling-shutter: the dynamic rolling shutter's per-camera motion and readout (rolling_shutter_motion.hpp); null = off
         std::unique_ptr<RollingShutterMotion> rolling_shutter_;
+        // --bg-mode cubemap (LFC): the learned background cubemap (bg_cubemap.hpp); null = off
+        std::unique_ptr<BackgroundCubemap> bg_cubemap_;
+        bool bg_cubemap_saved_ = false; // <output>/bg_cubemap written once at the last iteration
         core::Tensor loss_weight_source_;
         core::Tensor loss_weight_map_;
         core::Tensor loss_weight_combined_;

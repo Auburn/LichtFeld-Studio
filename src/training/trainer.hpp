@@ -870,6 +870,7 @@ namespace lfs::training {
         // Train-set EXIF EV mean used by seed_exposure (0.5 * (ev - mean)). Unset
         // when the seed was skipped or disabled; eval then uses exposure 0.
         std::optional<float> ppisp_exif_exposure_mean_;
+        bool ppisp_dump_written_ = false; // LFQ: ppisp_final.txt written once at the last iteration
         mutable std::atomic<int> eval_ppisp_applied_{0};
         mutable std::atomic<int> eval_ppisp_exif_{0};
         mutable std::atomic<int> eval_ppisp_nearest_{0};

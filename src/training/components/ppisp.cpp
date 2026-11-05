@@ -5,6 +5,7 @@
 #include "config_serialization.hpp"
 #include "core/cuda_error.hpp"
 #include "core/logger.hpp"
+#include "core/path_utils.hpp"
 #include "core/tensor/internal/tensor_serialization.hpp"
 #include <algorithm>
 #include <array>
@@ -13,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <format>
+#include <fstream>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -1131,14 +1133,27 @@ namespace lfs::training {
             crf_group = {crf_params_.ptr<float>(), crf_exp_avg_.ptr<float>(), crf_exp_avg_sq_.ptr<float>(),
                          crf_grad_.ptr<float>(), static_cast<int>(crf_params_.numel())};
         }
+        // --ppisp-lock-frames: the per-frame groups are left out (an empty group is skipped by the kernel), so the
+        // exposure and colour latents, and their Adam moments, are never written.
+        // --ppisp-lock-colour: only the colour group is left out (the per-frame white balance / colour correction stays
+        // at identity, the footage as shot); exposure steps exactly as without the flag.
+        kernels::PPISPAdamGroup exposure_group{};
+        kernels::PPISPAdamGroup color_group{};
+        if (!lock_frames_) {
+            exposure_group = {exposure_params_.ptr<float>(), exposure_exp_avg_.ptr<float>(),
+                              exposure_exp_avg_sq_.ptr<float>(), exposure_grad_.ptr<float>(),
+                              static_cast<int>(exposure_params_.numel())};
+            if (!lock_colour_)
+                color_group = {color_params_.ptr<float>(), color_exp_avg_.ptr<float>(),
+                               color_exp_avg_sq_.ptr<float>(), color_grad_.ptr<float>(),
+                               static_cast<int>(color_params_.numel())};
+        }
         kernels::launch_ppisp_adam_update_batched(
-            {exposure_params_.ptr<float>(), exposure_exp_avg_.ptr<float>(), exposure_exp_avg_sq_.ptr<float>(),
-             exposure_grad_.ptr<float>(), static_cast<int>(exposure_params_.numel())},
+            exposure_group,
             {vignetting_params_.ptr<float>(), vignetting_exp_avg_.ptr<float>(),
              vignetting_exp_avg_sq_.ptr<float>(), vignetting_grad_.ptr<float>(),
              static_cast<int>(vignetting_params_.numel())},
-            {color_params_.ptr<float>(), color_exp_avg_.ptr<float>(), color_exp_avg_sq_.ptr<float>(),
-             color_grad_.ptr<float>(), static_cast<int>(color_params_.numel())},
+            color_group,
             crf_group, lr, beta1, beta2, bc1_rcp, bc2_sqrt_rcp, eps, nullptr);
     }
 
@@ -1174,8 +1189,8 @@ namespace lfs::training {
         assert(exposure_params_.ndim() == 1);
         assert(static_cast<int>(exposure_params_.shape()[0]) == num_frames_);
         assert(color_params_.numel() == static_cast<size_t>(num_frames_) * 8);
-        if (num_frames_ <= 0)
-            return;
+        if (num_frames_ <= 0 || lock_frames_)
+            return; // --ppisp-lock-frames: locked latents are never re-centred either
 
         kernels::launch_ppisp_project_mean(
             exposure_params_.ptr<float>(), color_params_.ptr<float>(), num_frames_, nullptr);
@@ -1708,6 +1723,63 @@ namespace lfs::training {
             vig_reg_loss_ = lfs::core::Tensor::zeros({1}, lfs::core::Device::CUDA);
         }
         finalized_ = true;
+    }
+
+    std::expected<void, std::string> PPISP::write_text_dump(
+        const std::filesystem::path& path, const std::unordered_map<int, std::string>& frame_names,
+        const std::string& mode, const int iteration) const {
+        if (!finalized_)
+            return std::unexpected("PPISP dump: not finalized");
+        const auto exposure_cpu = exposure_params_.cpu();
+        const auto vignetting_cpu = vignetting_params_.cpu();
+        const auto color_cpu = color_params_.cpu();
+        const auto crf_cpu = crf_params_.cpu();
+        const float* exp_ptr = exposure_cpu.ptr<float>();
+        const float* vig_ptr = vignetting_cpu.ptr<float>();
+        const float* color_ptr = color_cpu.ptr<float>();
+        const float* crf_ptr = crf_cpu.ptr<float>();
+
+        std::ofstream os(path, std::ios::out | std::ios::trunc);
+        if (!os)
+            return std::unexpected(std::format("PPISP dump: cannot open '{}'", lfs::core::path_to_utf8(path)));
+        // Raw stored values; the forward model is kernels/ppisp_math.cuh (exposure 2^ev; vignetting
+        // clamp01(1 + a0 r^2 + a1 r^4 + a2 r^6), r from the image centre + (cx, cy) in units of max(W, H);
+        // colour = ZCA-whitened chromaticity homography of the 8 latents; CRF toe/shoulder/gamma via
+        // 0.3/0.3/0.1 + softplus(raw), centre via sigmoid(raw)).
+        os << "# LichtFeld PPISP state (LFQ write_text_dump)\n";
+        os << std::format("mode {}\niteration {}\nstep {}\nlock_frames {}\nlock_colour {}\ntrain_crf {}\nnum_cameras {}\n"
+                          "num_frames {}\n",
+                          mode, iteration, step_, lock_frames_ ? 1 : 0, lock_colour_ ? 1 : 0, config_.train_crf ? 1 : 0,
+                          num_cameras_, num_frames_);
+        os << "exif_exposure_mean " << (exif_exposure_mean_ ? std::format("{:.9g}", *exif_exposure_mean_) : "none") << "\n";
+        os << "# camera <camera_id> <index> vig R(cx cy a0 a1 a2) G(...) B(...) crf R(toe shoulder gamma center) G(...) B(...)\n";
+        std::vector<std::pair<int, int>> cams(camera_id_to_idx_.begin(), camera_id_to_idx_.end());
+        std::sort(cams.begin(), cams.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+        for (const auto& [camera_id, idx] : cams) {
+            os << std::format("camera {} {} vig", camera_id, idx);
+            for (int k = 0; k < 15; ++k)
+                os << std::format(" {:.9g}", vig_ptr[static_cast<size_t>(idx) * 15 + k]);
+            os << " crf";
+            for (int k = 0; k < 12; ++k)
+                os << std::format(" {:.9g}", crf_ptr[static_cast<size_t>(idx) * 12 + k]);
+            os << "\n";
+        }
+        os << "# frame <index> <uid> <camera_id> <image name> <exposure ev> <8 colour latents: b r g n (x y)>\n";
+        std::vector<std::pair<int, int>> frames(uid_to_frame_idx_.begin(), uid_to_frame_idx_.end());
+        std::sort(frames.begin(), frames.end(), [](const auto& a, const auto& b) { return a.second < b.second; });
+        for (const auto& [uid, idx] : frames) {
+            const auto name_it = frame_names.find(uid);
+            const auto cam_it = uid_to_camera_id_.find(uid);
+            os << std::format("frame {} {} {} {} {:.9g}", idx, uid, cam_it != uid_to_camera_id_.end() ? cam_it->second : -1,
+                              name_it != frame_names.end() ? name_it->second : std::string("?"), exp_ptr[idx]);
+            for (int k = 0; k < 8; ++k)
+                os << std::format(" {:.9g}", color_ptr[static_cast<size_t>(idx) * 8 + k]);
+            os << "\n";
+        }
+        os.flush();
+        if (!os)
+            return std::unexpected(std::format("PPISP dump: write failed for '{}'", lfs::core::path_to_utf8(path)));
+        return {};
     }
 
 } // namespace lfs::training

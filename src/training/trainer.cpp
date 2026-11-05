@@ -1128,6 +1128,7 @@ namespace lfs::training {
         ppisp_.reset();
         ppisp_controller_pool_.reset();
         ppisp_exif_exposure_mean_.reset();
+        ppisp_dump_written_ = false;
         eval_ppisp_applied_.store(0);
         eval_ppisp_exif_.store(0);
         eval_ppisp_nearest_.store(0);
@@ -1317,6 +1318,39 @@ namespace lfs::training {
 
             if (auto result = apply_ppisp_sidecar_if_configured(); !result) {
                 return result;
+            }
+
+            if (params_.optimization.ppisp_lock_frames) {
+                if (!params_.optimization.use_ppisp || exposure_correction)
+                    return std::unexpected("--ppisp-lock-frames requires --ppisp and --no-exposure-correction");
+                ppisp_->set_lock_frames(true);
+                LOG_INFO("PPISP per-frame appearance LOCKED (--ppisp-lock-frames): {} frames keep exposure and the 8 "
+                         "colour latents at their initial values ({}): no Adam step, no mean projection; per-camera "
+                         "vignetting and CRF (train_crf={}) still train",
+                         ppisp_->num_frames(),
+                         ppisp_exif_exposure_mean_ ? "exposure EXIF-seeded, colour identity" : "identity: 0 EV, identity colour",
+                         config.train_crf);
+            }
+
+            if (params_.optimization.ppisp_lock_colour) {
+                if (!params_.optimization.use_ppisp || exposure_correction)
+                    return std::unexpected("--ppisp-lock-colour requires --ppisp and --no-exposure-correction");
+                ppisp_->set_lock_colour(true);
+                float max_abs_colour = 0.0f;
+                {
+                    const auto colour_cpu = ppisp_->color_params().cpu();
+                    const float* cp = colour_cpu.ptr<float>();
+                    for (size_t i = 0; i < colour_cpu.numel(); ++i)
+                        max_abs_colour = std::max(max_abs_colour, std::abs(cp[i]));
+                }
+                LOG_INFO("PPISP per-frame colour LOCKED (--ppisp-lock-colour): {} frames keep all 8 colour latents (white "
+                         "point + primaries) at their initial values (max |latent| {}{}): no Adam step; per-frame "
+                         "exposure ({}), per-camera vignetting and CRF (train_crf={}) still train",
+                         ppisp_->num_frames(), max_abs_colour,
+                         max_abs_colour == 0.0f ? " = identity, the footage's own white balance" : ", NOT identity",
+                         ppisp_->lock_frames() ? "locked too, --ppisp-lock-frames"
+                                               : (ppisp_exif_exposure_mean_ ? "EXIF-seeded" : "from 0 EV"),
+                         config.train_crf);
             }
 
             return {};
@@ -4089,6 +4123,7 @@ namespace lfs::training {
         ppisp_.reset();
         ppisp_controller_pool_.reset();
         ppisp_exif_exposure_mean_.reset();
+        ppisp_dump_written_ = false;
         eval_ppisp_applied_.store(0);
         eval_ppisp_exif_.store(0);
         eval_ppisp_nearest_.store(0);
@@ -8775,6 +8810,26 @@ namespace lfs::training {
                         persistent_commit = true;
 
                         nvtxRangePop();
+                    }
+                    // LFQ: the learned PPISP / exposure-correction state as plain text at the last iteration
+                    // (<output>/ppisp_final.txt), since the project file that also holds it is usually deleted.
+                    if (ppisp_ && ppisp_->isFinalized() && step_params.ppisp_active() &&
+                        iter >= get_total_iterations() && !ppisp_dump_written_) {
+                        ppisp_dump_written_ = true;
+                        std::unordered_map<int, std::string> frame_names;
+                        for (const auto& c : train_dataset_->get_cameras())
+                            if (c)
+                                frame_names[c->uid()] = c->image_name();
+                        const auto dump_path = params_.dataset.output_path / "ppisp_final.txt";
+                        if (auto dumped = ppisp_->write_text_dump(
+                                dump_path, frame_names,
+                                step_params.use_exposure_correction ? "exposure_correction" : "ppisp", iter);
+                            !dumped)
+                            LOG_ERROR("{}", dumped.error());
+                        else
+                            LOG_INFO("PPISP state at iteration {} written to {} (lock_frames={}, lock_colour={})",
+                                     iter, lfs::core::path_to_utf8(dump_path), ppisp_->lock_frames(),
+                                     ppisp_->lock_colour());
                     }
                 }
 

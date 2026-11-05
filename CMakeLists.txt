@@ -362,6 +362,8 @@ endif()
 
 # Minimum SM for PTX-only (75=Turing, 80=Ampere, 86=GA102, 89=Ada, 90=Hopper)
 set(BUILD_CUDA_MIN_SM "75" CACHE STRING "Minimum SM for PTX-only builds")
+# LFR_mg: explicit SM list for a multi-GPU fat binary (e.g. "89;120"); empty = upstream behaviour
+set(LFS_CUDA_ARCHS "" CACHE STRING "Explicit CUDA SM list for a multi-GPU fat binary (e.g. 89;120)")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CUDA_STANDARD 20)
@@ -436,6 +438,30 @@ if(BUILD_CUDA_PTX_ONLY)
     set(TORCH_CUDA_ARCH_LIST "${_maj}.${_min}+PTX" CACHE STRING "" FORCE)
 
     message(STATUS "CUDA: PTX-only (SM >= ${BUILD_CUDA_MIN_SM}, JIT at runtime)")
+elseif(LFS_CUDA_ARCHS)
+    # LFR_mg (multi-GPU): explicit fat binary, e.g. -DLFS_CUDA_ARCHS="89;120". Real SASS for
+    # every listed SM (no PTX, no JIT), like "native" but for all of them; the runtime floor
+    # is the lowest listed SM. nvImageCodec gets the same list (external/CMakeLists.txt).
+    set(_lfs_arch_list "")
+    set(_lfs_torch_list "")
+    set(_lfs_min_sm "")
+    foreach(_lfs_sm IN LISTS LFS_CUDA_ARCHS)
+        if(NOT _lfs_sm MATCHES "^[0-9]+$" OR _lfs_sm LESS 70)
+            message(FATAL_ERROR "LFS_CUDA_ARCHS entries must be integer SMs >= 70, got '${_lfs_sm}'")
+        endif()
+        list(APPEND _lfs_arch_list "${_lfs_sm}-real")
+        math(EXPR _maj "${_lfs_sm}/10")
+        math(EXPR _min "${_lfs_sm}%10")
+        list(APPEND _lfs_torch_list "${_maj}.${_min}")
+        if(_lfs_min_sm STREQUAL "" OR _lfs_sm LESS _lfs_min_sm)
+            set(_lfs_min_sm "${_lfs_sm}")
+        endif()
+    endforeach()
+    set(LichtFeld-Studio_CUDA_ARCH "${_lfs_arch_list}")
+    set(LFS_RUNTIME_MIN_SM "${_lfs_min_sm}")
+    set(LFS_CODEC_CUDA_ARCHS "${LFS_CUDA_ARCHS}")
+    set(TORCH_CUDA_ARCH_LIST "${_lfs_torch_list}" CACHE STRING "" FORCE)
+    message(STATUS "CUDA: multi-GPU fat binary (${LichtFeld-Studio_CUDA_ARCH})")
 else()
     # Native GPU only
     set(TORCH_CUDA_ARCH_LIST "${DETECTED_COMPUTE_CAP}" CACHE STRING "" FORCE)

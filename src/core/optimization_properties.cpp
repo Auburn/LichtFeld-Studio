@@ -981,6 +981,19 @@ namespace lfs::core::param {
             .locale("training_params.ppisp_freeze_from_sidecar")
             .tooltip("training.tooltip.ppisp_freeze_from_sidecar")
             .all_strategies()
+            .bool_prop(&OptimizationParameters::ppisp_lock_frames,
+                       "ppisp_lock_frames", "Lock Per-Frame Appearance", d.ppisp_lock_frames,
+                       "Keep PPISP per-frame exposure and colour at their initial values (identity unless EXIF-seeded): "
+                       "no optimizer step, no mean projection; per-camera vignetting and CRF still train. Requires --ppisp")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .bool_prop(&OptimizationParameters::ppisp_lock_colour,
+                       "ppisp_lock_colour", "Lock Per-Frame Colour", d.ppisp_lock_colour,
+                       "Keep every PPISP per-frame colour latent (white point and primaries: the per-frame white balance) "
+                       "at identity, i.e. the footage as shot: no optimizer step. Per-frame exposure, per-camera vignetting "
+                       "and CRF still train. Requires --ppisp")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .int_prop(&OptimizationParameters::ppisp_controller_activation_step,
                       "ppisp_controller_activation_step", "Controller Step", d.ppisp_controller_activation_step, -1, 100000,
                       "Iteration to start controller distillation (negative = final 5000 planned steps)")

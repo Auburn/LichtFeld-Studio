@@ -119,7 +119,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/nvImageCodec/CMakeLists.txt")
     # Keep the codec's architectures consistent with the floor the app advertises at startup
     # (LFS_MIN_SM). A portable PTX-only build must not ship a codec built only for the
     # architecture of whatever machine produced it.
-    if(DEFINED LFS_RUNTIME_MIN_SM)
+    if(LFS_CODEC_CUDA_ARCHS)
+        # LFR_mg multi-GPU fat binary: same SM list as the app (see LFS_CUDA_ARCHS)
+        set(CUDA_TARGET_ARCHS "${LFS_CODEC_CUDA_ARCHS}" CACHE STRING "" FORCE)
+    elseif(DEFINED LFS_RUNTIME_MIN_SM)
         set(CUDA_TARGET_ARCHS "${LFS_RUNTIME_MIN_SM}" CACHE STRING "" FORCE)
     endif()
     set(BUILD_NVJPEG_EXT ON CACHE BOOL "" FORCE)

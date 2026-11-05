@@ -1258,6 +1258,12 @@ namespace lfs::core::param {
                         "cubemap sky-like and low-frequency; 0 = off)")
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .string_prop(&OptimizationParameters::bg_cubemap_init,
+                         "bg_cubemap_init", "Background Cubemap Init", d.bg_cubemap_init,
+                         "--bg-mode cubemap: start the cubemap from this faces.npy (float32 [6, R, R, 3], faces +X -X +Y -Y "
+                         "+Z -Z as the export writes them, resampled if R differs) instead of the clear colour")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .build();
     }
 

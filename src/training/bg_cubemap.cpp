@@ -53,6 +53,156 @@ namespace lfs::training {
             }
             return true;
         }
+
+        // NumPy .npy (v1/v2/v3), little-endian float32 or float64, C order -> float32 values + shape
+        bool read_npy(const std::filesystem::path& p, std::vector<float>& out, std::vector<size_t>& shape, std::string& error) {
+            std::ifstream is(p, std::ios::binary);
+            if (!is) {
+                error = std::format("cannot open '{}'", lfs::core::path_to_utf8(p));
+                return false;
+            }
+            char magic[8] = {};
+            is.read(magic, 8);
+            if (!is || std::memcmp(magic, "\x93NUMPY", 6) != 0) {
+                error = std::format("'{}' is not a .npy file", lfs::core::path_to_utf8(p));
+                return false;
+            }
+            size_t hl = 0;
+            if (magic[6] == 1) {
+                unsigned char b[2] = {};
+                is.read(reinterpret_cast<char*>(b), 2);
+                hl = b[0] | (static_cast<size_t>(b[1]) << 8);
+            } else {
+                unsigned char b[4] = {};
+                is.read(reinterpret_cast<char*>(b), 4);
+                hl = b[0] | (static_cast<size_t>(b[1]) << 8) | (static_cast<size_t>(b[2]) << 16) | (static_cast<size_t>(b[3]) << 24);
+            }
+            std::string header(hl, '\0');
+            is.read(header.data(), static_cast<std::streamsize>(hl));
+            if (!is) {
+                error = "truncated .npy header";
+                return false;
+            }
+            const bool f4 = header.find("'<f4'") != std::string::npos, f8 = header.find("'<f8'") != std::string::npos;
+            if (!f4 && !f8) {
+                error = std::format("'{}': dtype must be little-endian float32 or float64 (header {})", lfs::core::path_to_utf8(p), header);
+                return false;
+            }
+            if (header.find("'fortran_order': False") == std::string::npos) {
+                error = "fortran-ordered .npy is not supported";
+                return false;
+            }
+            const auto a = header.find('('), b = header.find(')', a == std::string::npos ? 0 : a);
+            if (a == std::string::npos || b == std::string::npos) {
+                error = "no shape in the .npy header";
+                return false;
+            }
+            shape.clear();
+            size_t count = 1;
+            for (size_t i = a + 1; i < b;) {
+                while (i < b && (header[i] == ' ' || header[i] == ','))
+                    ++i;
+                if (i >= b)
+                    break;
+                size_t v = 0;
+                while (i < b && header[i] >= '0' && header[i] <= '9')
+                    v = v * 10 + static_cast<size_t>(header[i++] - '0');
+                shape.push_back(v);
+                count *= v;
+                while (i < b && header[i] != ',')
+                    ++i;
+            }
+            out.resize(count);
+            if (f4) {
+                is.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(count * sizeof(float)));
+            } else {
+                std::vector<double> d(count);
+                is.read(reinterpret_cast<char*>(d.data()), static_cast<std::streamsize>(count * sizeof(double)));
+                for (size_t i = 0; i < count; ++i)
+                    out[i] = static_cast<float>(d[i]);
+            }
+            if (!is) {
+                error = std::format("'{}': truncated data ({} values expected)", lfs::core::path_to_utf8(p), count);
+                return false;
+            }
+            return true;
+        }
+
+        // Host versions of the kernel's face table / seam rule (kernels/bg_cubemap.cu), for resampling an init cubemap.
+        void dir_to_face_h(const double x, const double y, const double z, int& f, double& s, double& t) {
+            const double ax = std::fabs(x), ay = std::fabs(y), az = std::fabs(z);
+            double ma, sc, tc;
+            if (ax >= ay && ax >= az) {
+                ma = ax;
+                f = x > 0 ? 0 : 1;
+                sc = x > 0 ? -z : z;
+                tc = -y;
+            } else if (ay >= az) {
+                ma = ay;
+                f = y > 0 ? 2 : 3;
+                sc = x;
+                tc = y > 0 ? z : -z;
+            } else {
+                ma = az;
+                f = z > 0 ? 4 : 5;
+                sc = z > 0 ? x : -x;
+                tc = -y;
+            }
+            ma = std::max(ma, 1e-30);
+            s = std::clamp(sc / ma, -1.0, 1.0);
+            t = std::clamp(tc / ma, -1.0, 1.0);
+        }
+
+        void face_to_dir_h(const int f, const double s, const double t, double d[3]) {
+            switch (f) {
+            case 0: d[0] = 1; d[1] = -t; d[2] = -s; break;
+            case 1: d[0] = -1; d[1] = -t; d[2] = s; break;
+            case 2: d[0] = s; d[1] = 1; d[2] = t; break;
+            case 3: d[0] = s; d[1] = -1; d[2] = -t; break;
+            case 4: d[0] = s; d[1] = -t; d[2] = 1; break;
+            default: d[0] = -s; d[1] = -t; d[2] = -1; break;
+            }
+        }
+
+        size_t texel_index_h(const int f, const int i, const int j, const int R) {
+            if (i >= 0 && i < R && j >= 0 && j < R)
+                return (static_cast<size_t>(f) * R + j) * R + i;
+            double d[3];
+            face_to_dir_h(f, (2.0 * i + 1.0) / R - 1.0, (2.0 * j + 1.0) / R - 1.0, d);
+            int f2;
+            double s2, t2;
+            dir_to_face_h(d[0], d[1], d[2], f2, s2, t2);
+            const int i2 = std::clamp(static_cast<int>(std::floor((s2 + 1.0) * 0.5 * R)), 0, R - 1);
+            const int j2 = std::clamp(static_cast<int>(std::floor((t2 + 1.0) * 0.5 * R)), 0, R - 1);
+            return (static_cast<size_t>(f2) * R + j2) * R + i2;
+        }
+
+        // Every texel of a res x res cubemap = the source cubemap (R0) sampled bilinearly at that texel's centre direction.
+        std::vector<float> resample_cubemap(const std::vector<float>& src, const int R0, const int R) {
+            std::vector<float> out(static_cast<size_t>(6) * R * R * 3);
+            for (int f = 0; f < 6; ++f)
+                for (int j = 0; j < R; ++j)
+                    for (int i = 0; i < R; ++i) {
+                        double d[3];
+                        face_to_dir_h(f, (2.0 * i + 1.0) / R - 1.0, (2.0 * j + 1.0) / R - 1.0, d);
+                        int g;
+                        double s, t;
+                        dir_to_face_h(d[0], d[1], d[2], g, s, t);
+                        const double x = (s + 1.0) * 0.5 * R0 - 0.5, y = (t + 1.0) * 0.5 * R0 - 0.5;
+                        const double x0 = std::floor(x), y0 = std::floor(y), wx = x - x0, wy = y - y0;
+                        const int i0 = static_cast<int>(x0), j0 = static_cast<int>(y0);
+                        const size_t k[4] = {texel_index_h(g, i0, j0, R0), texel_index_h(g, i0 + 1, j0, R0),
+                                             texel_index_h(g, i0, j0 + 1, R0), texel_index_h(g, i0 + 1, j0 + 1, R0)};
+                        const double w[4] = {(1 - wx) * (1 - wy), wx * (1 - wy), (1 - wx) * wy, wx * wy};
+                        for (int c = 0; c < 3; ++c) {
+                            double v = 0;
+                            for (int q = 0; q < 4; ++q)
+                                v += w[q] * src[k[q] * 3 + c];
+                            out[((static_cast<size_t>(f) * R + j) * R + i) * 3 + c] = static_cast<float>(v);
+                        }
+                    }
+            return out;
+        }
     } // namespace
 
     bool BackgroundCubemap::dump_last(const std::filesystem::path& path, std::string& error, cudaStream_t stream) {
@@ -93,7 +243,55 @@ namespace lfs::training {
             !check(cudaMemset(c->adam_v_, 0, bytes), "memset", error) ||
             !check(cudaMemset(c->stats_, 0, 8 * sizeof(float)), "memset", error))
             return nullptr;
-        kernels::cubemap_fill(c->texels_, settings.res, settings.init[0], settings.init[1], settings.init[2], nullptr);
+        if (settings.init_path.empty()) {
+            kernels::cubemap_fill(c->texels_, settings.res, settings.init[0], settings.init[1], settings.init[2], nullptr);
+            c->init_host_.resize(c->n_);
+            for (size_t k = 0; k < c->n_; ++k)
+                c->init_host_[k] = settings.init[k % 3];
+            c->init_note_ = std::format("({:.4f}, {:.4f}, {:.4f})", settings.init[0], settings.init[1], settings.init[2]);
+        } else {
+            // --bg-cubemap-init: a faces.npy as written by save() ([6, R0, R0, 3] float, faces +X -X +Y -Y +Z -Z, the photos'
+            // encoding), resampled bilinearly (seam rule as the kernel) when R0 != res; values clamped to [0, 1] as in training.
+            std::vector<float> src;
+            std::vector<size_t> shape;
+            std::string npy_error;
+            const auto path = lfs::core::utf8_to_path(settings.init_path);
+            if (!read_npy(path, src, shape, npy_error)) {
+                error = "--bg-cubemap-init: " + npy_error;
+                return nullptr;
+            }
+            if (shape.size() != 4 || shape[0] != 6 || shape[1] != shape[2] || shape[3] != 3 || shape[1] < 2) {
+                std::string sh;
+                for (const size_t v : shape)
+                    sh += std::format("{}{}", sh.empty() ? "" : ", ", v);
+                error = std::format("--bg-cubemap-init: '{}' must hold [6, R, R, 3] (got [{}])", settings.init_path, sh);
+                return nullptr;
+            }
+            const int R0 = static_cast<int>(shape[1]);
+            size_t nonfinite = 0;
+            for (float& v : src) {
+                if (!std::isfinite(v)) {
+                    v = 0.0f;
+                    ++nonfinite;
+                }
+                v = std::clamp(v, 0.0f, 1.0f);
+            }
+            if (nonfinite) {
+                error = std::format("--bg-cubemap-init: '{}' holds {} non-finite values", settings.init_path, nonfinite);
+                return nullptr;
+            }
+            c->init_host_ = R0 == settings.res ? src : resample_cubemap(src, R0, settings.res);
+            const std::vector<float>& init = c->init_host_;
+            if (!check(cudaMemcpy(c->texels_, init.data(), bytes, cudaMemcpyHostToDevice), "upload init", error))
+                return nullptr;
+            double mean[3] = {0, 0, 0};
+            for (size_t k = 0; k < init.size(); ++k)
+                mean[k % 3] += init[k];
+            const double inv = 3.0 / static_cast<double>(init.size());
+            c->init_note_ = std::format("'{}' ({} x {} per face{}; mean ({:.4f}, {:.4f}, {:.4f}))", settings.init_path, R0, R0,
+                                        R0 == settings.res ? "" : std::format(", resampled to {}", settings.res),
+                                        mean[0] * inv, mean[1] * inv, mean[2] * inv);
+        }
         if (!check(cudaDeviceSynchronize(), "init", error))
             return nullptr;
         return c;
@@ -106,11 +304,11 @@ namespace lfs::training {
     }
 
     std::string BackgroundCubemap::description() const {
-        return std::format("Learned background cubemap (--bg-mode cubemap): 6 x {} x {} RGB texels initialised to ({:.4f}, {:.4f}, "
-                           "{:.4f}); Adam lr {:g} decaying to {:g} at the last iteration; smoothness weight {:g}; drawn through each "
+        return std::format("Learned background cubemap (--bg-mode cubemap): 6 x {} x {} RGB texels initialised to {}; Adam lr {:g} "
+                           "decaying to {:g} at the last iteration; smoothness weight {:g}; drawn through each "
                            "camera's lens and rolling-shutter row pose; exported to <output>/bg_cubemap/",
-                           settings_.res, settings_.res, settings_.init[0], settings_.init[1], settings_.init[2], settings_.lr,
-                           settings_.lr * settings_.lr_final_factor, settings_.smooth);
+                           settings_.res, settings_.res, init_note_, settings_.lr, settings_.lr * settings_.lr_final_factor,
+                           settings_.smooth);
     }
 
     const lfs::core::Tensor& BackgroundCubemap::render(const lfs::core::Camera& camera,
@@ -223,7 +421,7 @@ namespace lfs::training {
                 sum[c] += x;
                 mn[c] = std::min(mn[c], x);
                 mx[c] = std::max(mx[c], x);
-                if (std::fabs(x - settings_.init[c]) > 0.5f / 255.0f)
+                if (std::fabs(x - init_host_[t * 3 + c]) > 0.5f / 255.0f)
                     m = true;
             }
             if (m) {

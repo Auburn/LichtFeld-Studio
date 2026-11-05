@@ -20,6 +20,7 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace fast_lfs::rasterization {
     struct FastGSRollingShutter; // rasterization_config.h (private to lfs_training, as in rolling_shutter_motion.hpp)
@@ -32,7 +33,8 @@ namespace lfs::training {
         std::array<float, 3> init{};         // initial colour of every texel ([0, 1], the --bg-color)
         float lr = 2e-3f;                    // Adam learning rate at iteration 0
         float lr_final_factor = 0.1f;        // exponential decay to lr * factor at the last iteration
-        float smooth = 1.0f;                 // smoothness weight (0 = off)
+        float smooth = 100.0f;               // smoothness weight (0 = off)
+        std::string init_path;               // LFC2: start from this faces.npy (float32 [6, R0, R0, 3]; resampled to res)
     };
 
     class BackgroundCubemap {
@@ -68,6 +70,8 @@ namespace lfs::training {
         explicit BackgroundCubemap(const BackgroundCubemapSettings& settings) : settings_(settings) {}
 
         BackgroundCubemapSettings settings_;
+        std::string init_note_;      // how the texels were initialised (description())
+        std::vector<float> init_host_; // the initial texels (summary: how far each moved)
         size_t n_ = 0;               // floats: 6 R^2 3
         float* texels_ = nullptr;    // device
         float* grad_ = nullptr;

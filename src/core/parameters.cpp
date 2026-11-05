@@ -1116,6 +1116,8 @@ namespace lfs::core {
                 return error;
             if (bg_mode == BackgroundMode::Cubemap && gut)
                 return "--bg-mode cubemap needs the standard rasterizer (not --gut)";
+            if (!bg_cubemap_init.empty() && bg_mode != BackgroundMode::Cubemap)
+                return "--bg-cubemap-init requires --bg-mode cubemap";
             return {};
         }
 

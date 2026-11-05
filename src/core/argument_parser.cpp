@@ -104,6 +104,7 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--bg-cubemap-lr", "bg_cubemap_lr", Float},
             OptimizationCliBinding{"--bg-cubemap-lr-final", "bg_cubemap_lr_final", Float},
             OptimizationCliBinding{"--bg-cubemap-smooth", "bg_cubemap_smooth", Float},
+            OptimizationCliBinding{"--bg-cubemap-init", "bg_cubemap_init", String},
             OptimizationCliBinding{"--random", "random", Bool},
             OptimizationCliBinding{"--init-num-pts", "init_num_pts", Integer},
             OptimizationCliBinding{"--init-extent", "init_extent", Float},
@@ -893,6 +894,7 @@ namespace {
             ::args::ValueFlag<float> bg_cubemap_lr(training_group, "lr", lfs::core::args::optimization_cli_help("--bg-cubemap-lr"), {"bg-cubemap-lr"});
             ::args::ValueFlag<float> bg_cubemap_lr_final(training_group, "factor", lfs::core::args::optimization_cli_help("--bg-cubemap-lr-final"), {"bg-cubemap-lr-final"});
             ::args::ValueFlag<float> bg_cubemap_smooth(training_group, "weight", lfs::core::args::optimization_cli_help("--bg-cubemap-smooth"), {"bg-cubemap-smooth"});
+            ::args::ValueFlag<std::string> bg_cubemap_init(training_group, "faces.npy", lfs::core::args::optimization_cli_help("--bg-cubemap-init"), {"bg-cubemap-init"});
 
             // =============================================================================
             // INITIALIZATION
@@ -1761,6 +1763,7 @@ namespace {
                                         bg_cubemap_lr_val = cli_option_present({"--bg-cubemap-lr"}) ? std::optional<float>(::args::get(bg_cubemap_lr)) : std::optional<float>(),
                                         bg_cubemap_lr_final_val = cli_option_present({"--bg-cubemap-lr-final"}) ? std::optional<float>(::args::get(bg_cubemap_lr_final)) : std::optional<float>(),
                                         bg_cubemap_smooth_val = cli_option_present({"--bg-cubemap-smooth"}) ? std::optional<float>(::args::get(bg_cubemap_smooth)) : std::optional<float>(),
+                                        bg_cubemap_init_val = cli_option_present({"--bg-cubemap-init"}) ? std::optional<std::string>(::args::get(bg_cubemap_init)) : std::optional<std::string>(),
                                         random_flag = bool(random),
                                         gut_flag = bool(gut),
                                         undistort_flag = bool(undistort),
@@ -1995,6 +1998,10 @@ namespace {
                 setVal(bg_cubemap_lr_val, opt.bg_cubemap_lr);
                 setVal(bg_cubemap_lr_final_val, opt.bg_cubemap_lr_final);
                 setVal(bg_cubemap_smooth_val, opt.bg_cubemap_smooth);
+                if (bg_cubemap_init_val)
+                    opt.bg_cubemap_init = bg_cubemap_init_val->empty()
+                                              ? std::string{}
+                                              : lfs::core::path_to_utf8(absolute_input_path(*bg_cubemap_init_val));
                 setFlag(random_flag, opt.random);
                 setFlag(gut_flag, opt.gut);
                 setFlag(undistort_flag, opt.undistort);
@@ -2142,6 +2149,7 @@ namespace {
                 note_opt("bg_cubemap_lr", bg_cubemap_lr_val.has_value());
                 note_opt("bg_cubemap_lr_final", bg_cubemap_lr_final_val.has_value());
                 note_opt("bg_cubemap_smooth", bg_cubemap_smooth_val.has_value());
+                note_opt("bg_cubemap_init", bg_cubemap_init_val.has_value());
                 note_opt("random", random_flag);
                 note_opt("gut", gut_flag);
                 note_opt("undistort", undistort_flag);

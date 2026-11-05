@@ -3420,6 +3420,7 @@ namespace lfs::training {
                 cube_settings.lr = params.optimization.bg_cubemap_lr;
                 cube_settings.lr_final_factor = params.optimization.bg_cubemap_lr_final;
                 cube_settings.smooth = params.optimization.bg_cubemap_smooth;
+                cube_settings.init_path = params.optimization.bg_cubemap_init;
                 std::string cube_error;
                 bg_cubemap_ = BackgroundCubemap::create(cube_settings, cube_error);
                 if (!bg_cubemap_)
@@ -8796,8 +8797,12 @@ namespace lfs::training {
                             const auto cube_dir = params_.dataset.output_path / "bg_cubemap";
                             std::string cube_error;
                             const std::string note = std::format(
-                                "init ({:.4f}, {:.4f}, {:.4f}), lr {:g} -> {:g}, smoothness {:g}, exposure correction {}, rolling shutter {}",
-                                step_params.bg_color[0], step_params.bg_color[1], step_params.bg_color[2], step_params.bg_cubemap_lr,
+                                "init {}, lr {:g} -> {:g}, smoothness {:g}, exposure correction {}, rolling shutter {}",
+                                step_params.bg_cubemap_init.empty()
+                                    ? std::format("({:.4f}, {:.4f}, {:.4f})", step_params.bg_color[0], step_params.bg_color[1],
+                                                  step_params.bg_color[2])
+                                    : step_params.bg_cubemap_init,
+                                step_params.bg_cubemap_lr,
                                 step_params.bg_cubemap_lr * step_params.bg_cubemap_lr_final, step_params.bg_cubemap_smooth,
                                 step_params.use_exposure_correction ? "on" : "off", rolling_shutter_ ? "on" : "off");
                             if (!bg_cubemap_->save(cube_dir, iter, note, cube_error, cubemap_stream))

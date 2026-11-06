@@ -4,6 +4,7 @@
 
 #include "ply.hpp"
 #include "core/assert.hpp"
+#include "core/kernel_shape_map.hpp"
 #include "core/cuda/sh_layout.cuh"
 #include "core/logger.hpp"
 #include "core/native_fs.hpp"
@@ -437,6 +438,7 @@ namespace lfs::io {
         // Pre-computed offsets for zero-copy access
         size_t pos_x_offset = SIZE_MAX, pos_y_offset = SIZE_MAX, pos_z_offset = SIZE_MAX;
         size_t opacity_offset = SIZE_MAX;
+        size_t shape_offset = SIZE_MAX; // --kernel-shape (LFQPLCYK): the optional float32 vertex property `shape` (beta)
         size_t scale_offsets[3] = {SIZE_MAX, SIZE_MAX, SIZE_MAX};
         size_t rot_offsets[4] = {SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX};
         size_t dc_offsets[ply_constants::MAX_DC_COMPONENTS];
@@ -818,6 +820,8 @@ namespace lfs::io {
                         }
                     } else if (prop_name == ply_constants::OPACITY) {
                         layout.opacity_offset = layout.vertex_stride;
+                    } else if (prop_name == lfs::core::kshape::kPlyProperty) {
+                        layout.shape_offset = layout.vertex_stride;
                     } else if (prop_name.starts_with(ply_constants::DC_PREFIX)) {
                         int idx = 0;
                         if (!parse_property_index(prop_name, ply_constants::DC_PREFIX,
@@ -2273,6 +2277,19 @@ namespace lfs::io {
             }
 
             splat_data.set_tensor_allocator(options.splat_tensor_allocator);
+
+            // --kernel-shape (LFQPLCYK): a `shape` vertex property (beta) becomes the model's raw r (beta 2 -> r 0
+            // exactly), over the rows the import kept
+            if (layout.shape_offset != SIZE_MAX) {
+                std::vector<float> shape_raw(N);
+                for (size_t i = 0; i < N; ++i) {
+                    const size_t row = validation.valid_rows.empty() ? i : validation.valid_rows[i];
+                    shape_raw[i] = lfs::core::kshape::raw_from_beta(
+                        read_unaligned_float32(vertex_data + row * layout.vertex_stride + layout.shape_offset));
+                }
+                splat_data._shape = Tensor::from_vector(shape_raw, TensorShape({N}), lfs::core::Device::CUDA);
+                LOG_INFO("PLY: per-splat kernel shape (`shape`) read for {} splats", N);
+            }
 
             // One-shot pool trim after the model is fully in SplatData / exportable
             // storage. q16 encode and H2D staging otherwise leave reserved_not_used
@@ -4037,6 +4054,20 @@ namespace lfs::io {
 
         if (!report_export_progress(options.progress_callback, 0.0f, "Preparing PLY"))
             return make_error(ErrorCode::CANCELLED, "Export cancelled by user", options.output_path);
+
+        // --kernel-shape (LFQPLCYK): beta as the extra vertex property `shape` (standard viewers ignore it)
+        if (splat_data._shape.is_valid() && splat_data._shape.numel() == static_cast<size_t>(splat_data.size()) &&
+            std::none_of(options.extra_attributes.begin(), options.extra_attributes.end(), [](const PlyAttributeBlock& b) {
+                return std::find(b.names.begin(), b.names.end(), lfs::core::kshape::kPlyProperty) != b.names.end();
+            })) {
+            const auto raw = splat_data._shape.cpu().to_vector();
+            std::vector<float> beta(raw.size());
+            for (size_t i = 0; i < raw.size(); ++i)
+                beta[i] = lfs::core::kshape::beta_from_raw(raw[i]);
+            options.extra_attributes.push_back(PlyAttributeBlock{
+                .values = Tensor::from_vector(beta, TensorShape({beta.size()}), lfs::core::Device::CPU),
+                .names = {std::string(lfs::core::kshape::kPlyProperty)}});
+        }
 
         Result<std::vector<PlyAttributeBlock>> filtered_extra_attributes;
         {

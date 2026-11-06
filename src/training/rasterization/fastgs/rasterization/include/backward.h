@@ -72,6 +72,8 @@ namespace fast_lfs::rasterization {
         const FastGSDistortion& distortion = {},
         const FastGSRollingShutter& rs = {},
         // --pose-opt: device [6], dL/d(left perturbation of w2c) is added (null = off; native fisheye only)
-        float* pose_grad = nullptr);
+        float* pose_grad = nullptr,
+        const float* shape_raw = nullptr, // --kernel-shape (LFQPLCYK): non-null = the forward drew the shape kernels
+        float* shape_grad = nullptr);     // dL/dbeta per primitive is added here (null = not wanted)
 
 } // namespace fast_lfs::rasterization

@@ -3485,6 +3485,20 @@ namespace lfs::training {
                 LOG_INFO("{}", rolling_shutter_->description());
             }
 
+            // --kernel-shape (LFQPLCYK): per-splat trainable kernel shape; the state lives on the model (refusals in
+            // OptimizationParameters::validate: not with --max-std-dev, --gut, --enable-mip, --enable-sparsity; MRNF only)
+            kernel_shape_.reset();
+            if (params.optimization.kernel_shape) {
+                KernelShapeSettings shape_settings;
+                shape_settings.lr = params.optimization.kernel_shape_lr;
+                shape_settings.start = static_cast<int>(params.optimization.kernel_shape_start);
+                auto created = KernelShape::create(shape_settings, strategy_->get_model());
+                if (!created)
+                    return std::unexpected(created.error());
+                kernel_shape_ = std::move(*created);
+                LOG_INFO("{}", kernel_shape_->description(strategy_->get_model()));
+            }
+
             // Per-camera pose refinement (--pose-opt; native fisheye standard rasterizer only, with or without the RS)
             pose_refinement_.reset();
             pose_refinement_exported_ = false;
@@ -7491,7 +7505,8 @@ namespace lfs::training {
                                     render_normal, render_depth,
                                     1.0f, true, distortion_options,
                                     screen_share_axis_code(step_params),
-                                    rolling_shutter_options, pose_options);
+                                    rolling_shutter_options, pose_options,
+                                    kernel_shape_ ? kernel_shape_->grad_for(strategy_->get_model(), nullptr) : nullptr);
                                 if (rasterize_result) {
                                     output = std::move(rasterize_result->first);
                                     fast_ctx.emplace(std::move(rasterize_result->second));
@@ -8953,6 +8968,10 @@ namespace lfs::training {
                                         pose_refinement_->step(*cam, iter,
                                                                lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
                                                                                                  : strategy_->get_model().means().stream());
+                                    if (kernel_shape_) // --kernel-shape: the per-splat shape Adam step (device)
+                                        kernel_shape_->step(strategy_->get_model(), iter,
+                                                            lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
+                                                                                              : strategy_->get_model().means().stream());
                                     if (fused_extra_gradients.edge_score_out != nullptr) {
                                         strategy_->on_edge_score_accumulated(iter);
                                     }
@@ -9132,6 +9151,12 @@ namespace lfs::training {
                         std::string rs_error;
                         if (!rolling_shutter_->save(params_.dataset.output_path / "rs_motion_learned.txt", rs_stream, rs_error))
                             LOG_ERROR("rolling shutter: {}", rs_error);
+                    }
+                    if (kernel_shape_ && (iter % kernel_shape_->settings().log_every == 0 || iter >= get_total_iterations())) {
+                        // --kernel-shape: the beta histogram (synchronous readback at this cadence only)
+                        const cudaStream_t shape_stream = lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
+                                                                                            : strategy_->get_model().means().stream();
+                        LOG_INFO("iter {}: {}", iter, kernel_shape_->summary(strategy_->get_model(), shape_stream));
                     }
                     if (pose_refinement_) {
                         const cudaStream_t pose_stream = lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()

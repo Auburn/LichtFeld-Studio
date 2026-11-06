@@ -33,6 +33,7 @@ namespace lfs::core {
         HAS_PPISP_CONTROLLER = 1 << 2,
         HAS_SPARSITY = 1 << 3,
         HAS_POPSPA = 1 << 4,
+        HAS_KERNEL_SHAPE = 1 << 5, // --kernel-shape (LFQPLCYK): the per-splat shape state follows the other sections
     };
 
     constexpr CheckpointFlags operator|(const CheckpointFlags a, const CheckpointFlags b) {

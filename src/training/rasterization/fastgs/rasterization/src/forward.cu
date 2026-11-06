@@ -205,7 +205,8 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
     const FastGSLens& lens,
     const FastGSDistortion& distortion,
     const int screen_share_axis,
-    const FastGSRollingShutter& rs) {
+    const FastGSRollingShutter& rs,
+    const float* shape_raw) {
 
     if (distortion.moments != nullptr && (distortion.depths == nullptr || distortion.grad_depths == nullptr))
         throw std::runtime_error("FastGS depth distortion: the per-splat depths and grad_depths buffers must be bound with the moments");
@@ -259,7 +260,16 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
                                  float* screen_share,
                                  const FastGSDistortion& preprocess_distortion) {
         // --lens-radial (LFRL): the radial lens table is its own instantiation (RADIAL = true); the others are unchanged
-        auto* const preprocess_kernel = lens.model == kLensFisheye
+        // --kernel-shape (LFQPLCYK): the SHAPE instantiations when shape_raw is bound; otherwise the unchanged kernels
+        auto* const preprocess_kernel = shape_raw != nullptr
+                                            ? (lens.model == kLensFisheye
+                                                   ? (lens.radial.seg != nullptr
+                                                          ? (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true, true, true>
+                                                                                  : kernels::forward::preprocess_cu<true, false, true, true>)
+                                                          : (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true, false, true>
+                                                                                  : kernels::forward::preprocess_cu<true, false, false, true>))
+                                                   : kernels::forward::preprocess_cu<false, false, false, true>)
+                                        : lens.model == kLensFisheye
                                             ? (lens.radial.seg != nullptr
                                                    ? (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true, true>
                                                                            : kernels::forward::preprocess_cu<true, false, true>)
@@ -312,7 +322,8 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
             lens,
             preprocess_distortion,
             screen_share_axis,
-            rs);
+            rs,
+            shape_raw);
         LFS_CUDA_LAUNCH_CHECK(stream, "fastgs.forward.preprocess");
     };
 
@@ -537,7 +548,8 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
                 forward_status,
                 grid.x,
                 static_cast<uint>(n_visible),
-                static_cast<uint>(n_instances));
+                static_cast<uint>(n_instances),
+                shape_raw != nullptr ? per_primitive_buffers.color : nullptr);
             LFS_CUDA_LAUNCH_CHECK(stream, "fastgs.forward.create_instances");
             check_cuda_with_fastgs_status(cudaGetLastError(), "create_instances", forward_status, "create_instances", static_cast<uint64_t>(n_primitives), n_tiles_u64);
             sync_fastgs_phase_if_requested("create_instances", forward_status, "create_instances", static_cast<uint64_t>(n_primitives), n_tiles_u64);
@@ -592,8 +604,8 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
     // Production: warp cull ON (mode 0), blend_batch_size from config (or test hook).
     const int warp_cull_mode = g_warp_cull_mode.load(std::memory_order_relaxed);
     const int blend_batch_override = g_blend_batch_size_override.load(std::memory_order_relaxed);
-    auto launch_blend_variant = [&]<bool RENDER_NORMAL, bool RENDER_DEPTH, bool DISTORTION>() {
-        kernels::forward::blend_cu<RENDER_NORMAL, RENDER_DEPTH, DISTORTION><<<grid, dim3(config::block_size_blend_forward), 0, stream>>>(
+    auto launch_blend_variant = [&]<bool RENDER_NORMAL, bool RENDER_DEPTH, bool DISTORTION, bool SHAPE>() {
+        kernels::forward::blend_cu<RENDER_NORMAL, RENDER_DEPTH, DISTORTION, SHAPE><<<grid, dim3(config::block_size_blend_forward), 0, stream>>>(
             per_tile_buffers.instance_ranges,
             sorted_primitive_indices,
             visibility_buffers.primitive_work_indices,
@@ -620,10 +632,16 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
     };
     // The distortion variant only when its buffers are bound; otherwise the unchanged kernels.
     auto launch_blend = [&]<bool RENDER_NORMAL, bool RENDER_DEPTH>() {
-        if (distortion.moments != nullptr)
-            launch_blend_variant.template operator()<RENDER_NORMAL, RENDER_DEPTH, true>();
+        // --kernel-shape (LFQPLCYK): its own instantiations; without it the unchanged kernels
+        if (shape_raw != nullptr) {
+            if (distortion.moments != nullptr)
+                launch_blend_variant.template operator()<RENDER_NORMAL, RENDER_DEPTH, true, true>();
+            else
+                launch_blend_variant.template operator()<RENDER_NORMAL, RENDER_DEPTH, false, true>();
+        } else if (distortion.moments != nullptr)
+            launch_blend_variant.template operator()<RENDER_NORMAL, RENDER_DEPTH, true, false>();
         else
-            launch_blend_variant.template operator()<RENDER_NORMAL, RENDER_DEPTH, false>();
+            launch_blend_variant.template operator()<RENDER_NORMAL, RENDER_DEPTH, false, false>();
     };
     if (normal != nullptr) {
         if (depth != nullptr)

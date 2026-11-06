@@ -21,6 +21,7 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/pose_refinement_update.cu
     kernels/bg_cubemap.cu
     kernels/ycc_loss.cu
+    kernels/kernel_shape_update.cu
     kernels/ssim.cu
     kernels/l1_loss.cu
     kernels/ssim_reduction.cu
@@ -135,6 +136,7 @@ set(TRAINING_NEW_SOURCES
         rolling_shutter_motion.cpp
         pose_refinement.cpp
         bg_cubemap.cpp
+        kernel_shape.cpp
         trainer_popspa.cpp
         normal_auto_generate.cpp
         vram_ledger.cpp

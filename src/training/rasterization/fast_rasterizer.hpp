@@ -238,7 +238,10 @@ namespace lfs::training {
         // --pose-opt (native fisheye; FastGSPose): a refined world-to-camera transform and centre drawn in place of the
         // camera's own, and the buffer the backward adds the pose gradient to (training/pose_refinement.hpp makes them).
         // Default: the camera's own transform, no pose gradient (the unchanged kernels).
-        const fast_lfs::rasterization::FastGSPose& pose = {});
+        const fast_lfs::rasterization::FastGSPose& pose = {},
+        // --kernel-shape (LFQPLCYK): a model carrying a shape state (SplatData::_shape) is always drawn with its beta;
+        // this device [N] buffer, when given, receives dL/dbeta from the backward (training/kernel_shape.hpp).
+        float* kernel_shape_grad = nullptr);
 
     // Backward pass with optional extra alpha gradient for masked training
     void fast_rasterize_backward(

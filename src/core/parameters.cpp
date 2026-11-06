@@ -939,6 +939,21 @@ namespace lfs::core {
                 return "loss_ycc_chroma_weight must be finite and >= 0, loss_ycc_luma_scale finite and > 0";
             if (!std::isfinite(max_std_dev) || max_std_dev < 0.0f || (max_std_dev > 0.0f && max_std_dev < 0.5f) || max_std_dev > 10.0f)
                 return std::format("max_std_dev must be 0 (off) or within [0.5, 10] (got {})", max_std_dev);
+            if (kernel_shape && max_std_dev > 0.0f)
+                return "--kernel-shape cannot be combined with --max-std-dev: the game's cut is in standard deviations of a Gaussian, "
+                       "which a beta != 2 kernel does not have (refused rather than redefined)";
+            if (kernel_shape && gut)
+                return "--kernel-shape is implemented for the standard (FastGS) rasterizer, not --gut";
+            if (kernel_shape && mip_filter)
+                return "--kernel-shape cannot be combined with --enable-mip (the mip filter's opacity compensation assumes a Gaussian)";
+            if (kernel_shape && enable_sparsity)
+                return "--kernel-shape cannot be combined with --enable-sparsity (POPSpa's scoring render draws the Gaussian kernel)";
+            if (kernel_shape && canonical_strategy_name(strategy) != kStrategyMRNF)
+                return "--kernel-shape carries the shape through MRNF's densification only: use --strategy mrnf";
+            if (!std::isfinite(kernel_shape_lr) || kernel_shape_lr < 0.0f || kernel_shape_lr > 1.0f)
+                return std::format("kernel_shape_lr must be within [0, 1] (got {})", kernel_shape_lr);
+            if (kernel_shape_start > MAX_ITERATION_VALUE)
+                return std::format("kernel_shape_start must be within [0, {}]", MAX_ITERATION_VALUE);
             if (max_std_dev > 0.0f && gut)
                 return "--max-std-dev applies to the standard rasterizer (not --gut)";
             if (max_std_dev > 0.0f && mip_filter)

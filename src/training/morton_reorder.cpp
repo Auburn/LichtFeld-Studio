@@ -493,6 +493,11 @@ namespace lfs::training::morton {
         permute_named_param(splat.rotation_raw(), result.permutation);
         permute_named_param(splat.opacity_raw(), result.permutation);
         permute_shN_impl(splat, result.permutation, stream, scratch);
+        // --kernel-shape (LFQPLCYK): the shape state follows the rows
+        if (splat._shape.is_valid() && splat._shape.numel() > 0)
+            permute_row_tensor(splat._shape, result.permutation);
+        if (splat._shape_adam.is_valid() && splat._shape_adam.numel() > 0)
+            permute_row_tensor(splat._shape_adam, result.permutation);
 
         if (splat._densification_info.is_valid() && splat._densification_info.numel() > 0) {
             permute_row_tensor(splat._densification_info, result.permutation);

@@ -8,7 +8,9 @@
 //       name width height model fx fy cx cy k1 k2 k3 k4 qw qx qy qz tx ty tz
 //     model PINHOLE or FISHEYE (OPENCV_FISHEYE; k = 0 is the equidistant lens); the pose is
 //     COLMAP's world-to-camera quaternion and translation. Writes <out_dir>/<name>.f32: float32
-//     RGB, row-major H x W x 3, black background, through fast_rasterize (the training path).
+//     RGB, row-major H x W x 3, black background, through fast_rasterize (the training path; with the model's
+//     per-splat kernel shape when its PLY has a `shape` property, LFQPLCYK). LFS_RENDER_ALPHA_DIR / LFS_RENDER_DEPTH_DIR:
+//     also the alpha / depth planes there (<name>.f32, float32 H x W, + <name>.json).
 //   LichtFeld-Studio lfe-fisheye projcheck
 //     The projection maths on the GPU against a double-precision reference.
 //   LichtFeld-Studio lfe-fisheye gradcheck
@@ -100,6 +102,8 @@ namespace lfs::app {
             }
             auto& model = **splat;
             std::println("{} splats, SH degree {}", model.size(), model.get_active_sh_degree());
+            if (model._shape.is_valid()) // LFQPLCYK: the PLY's `shape` property, drawn with each splat's beta
+                std::println("per-splat kernel shape (PLY property shape): {} values", model._shape.numel());
             std::filesystem::create_directories(out_dir);
             auto background = Tensor::zeros({3}, Device::CUDA);
 
@@ -140,6 +144,20 @@ namespace lfs::app {
                 std::ofstream f(path, std::ios::binary);
                 f.write(reinterpret_cast<const char*>(hwc.ptr<float>()), static_cast<std::streamsize>(sizeof(float) * 3ull * w * h));
                 std::println("{} {}x{} {} -> {}", name, w, h, fisheye ? "fisheye" : "pinhole", path.string());
+                // LFQPLCYK: opt-in extra outputs for the edge-width measure (the .f32 RGB set above is unchanged):
+                // LFS_RENDER_ALPHA_DIR / LFS_RENDER_DEPTH_DIR -> <dir>/<name>.f32 (float32 H x W) + <name>.json {"w", "h"}
+                for (const auto& [env, tensor] : {std::pair<const char*, const lfs::core::Tensor*>{"LFS_RENDER_ALPHA_DIR", &out.alpha},
+                                                  std::pair<const char*, const lfs::core::Tensor*>{"LFS_RENDER_DEPTH_DIR", &out.depth}}) {
+                    const char* dir = std::getenv(env);
+                    if (dir == nullptr || *dir == 0 || !tensor->is_valid() || tensor->numel() != static_cast<size_t>(w) * h)
+                        continue;
+                    std::filesystem::create_directories(dir);
+                    const auto plane = tensor->contiguous().cpu();
+                    std::ofstream fa(std::filesystem::path(dir) / (name + ".f32"), std::ios::binary);
+                    fa.write(reinterpret_cast<const char*>(plane.ptr<float>()), static_cast<std::streamsize>(sizeof(float) * w * h));
+                    std::ofstream fj(std::filesystem::path(dir) / (name + ".json"));
+                    fj << std::format("{{\"w\": {}, \"h\": {}}}", w, h) << '\n';
+                }
             }
             return 0;
         }

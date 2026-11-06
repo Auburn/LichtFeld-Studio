@@ -889,6 +889,9 @@ namespace lfs::core {
         copy._opacity = cloned(_opacity, "splat.opacity");
         copy._densification_info = cloned(_densification_info, "splat.densification_info");
         copy._max_screen_share = cloned(_max_screen_share, "splat.max_screen_share");
+        copy._shape = cloned(_shape, "splat.kernel_shape");
+        copy._shape_adam = cloned(_shape_adam, "splat.kernel_shape_adam");
+        copy._shape_step = _shape_step;
         copy._deleted = cloned(_deleted, "splat.deleted_mask");
         copy._deleted_count.store(_deleted_count.load(std::memory_order_relaxed),
                                   std::memory_order_relaxed);
@@ -935,6 +938,9 @@ namespace lfs::core {
         copy._opacity = clone_tensor(_opacity);
         copy._densification_info = clone_tensor(_densification_info);
         copy._max_screen_share = clone_tensor(_max_screen_share);
+        copy._shape = clone_tensor(_shape);
+        copy._shape_adam = clone_tensor(_shape_adam);
+        copy._shape_step = _shape_step;
         copy._deleted = clone_tensor(_deleted);
         copy._deleted_count.store(
             _deleted_count.load(std::memory_order_relaxed),
@@ -961,6 +967,9 @@ namespace lfs::core {
           _opacity(std::move(other._opacity)),
           _densification_info(std::move(other._densification_info)),
           _max_screen_share(std::move(other._max_screen_share)),
+          _shape(std::move(other._shape)),
+          _shape_adam(std::move(other._shape_adam)),
+          _shape_step(other._shape_step),
           _deleted(std::move(other._deleted)),
           _deleted_count(other._deleted_count.load(std::memory_order_relaxed)),
           _deleted_mask_version(other._deleted_mask_version.load(std::memory_order_relaxed)),
@@ -996,6 +1005,9 @@ namespace lfs::core {
             _opacity = std::move(other._opacity);
             _densification_info = std::move(other._densification_info);
             _max_screen_share = std::move(other._max_screen_share);
+            _shape = std::move(other._shape);
+            _shape_adam = std::move(other._shape_adam);
+            _shape_step = other._shape_step;
             _deleted = std::move(other._deleted);
 
             // Move LOD tree
@@ -1088,6 +1100,8 @@ namespace lfs::core {
             &_deleted,
             &_densification_info,
             &_max_screen_share,
+            &_shape,
+            &_shape_adam,
         };
         for (Tensor* tensor : tensors) {
             if (!tensor->is_valid() || tensor->device() != Device::CUDA) {
@@ -2045,6 +2059,8 @@ namespace lfs::core {
         Tensor saved_deleted = _deleted;
         Tensor saved_densify = _densification_info;
         Tensor saved_max_share = _max_screen_share;
+        Tensor saved_shape = _shape;
+        Tensor saved_shape_adam = _shape_adam;
         auto saved_frozen = _frozen_ranges;
 
         auto restore = [&]() {
@@ -2058,6 +2074,8 @@ namespace lfs::core {
             _deleted = saved_deleted;
             _densification_info = saved_densify;
             _max_screen_share = saved_max_share;
+            _shape = saved_shape;
+            _shape_adam = saved_shape_adam;
             _frozen_ranges = saved_frozen;
         };
 
@@ -2073,6 +2091,9 @@ namespace lfs::core {
             Tensor gathered_scaling = gather_rows(_scaling);
             Tensor gathered_rotation = gather_rows(_rotation);
             Tensor gathered_opacity = gather_rows(_opacity);
+            // --kernel-shape: the shape state follows the kept rows
+            Tensor gathered_shape = _shape.is_valid() ? gather_rows(_shape) : Tensor();
+            Tensor gathered_shape_adam = _shape_adam.is_valid() ? gather_rows(_shape_adam) : Tensor();
 
             if (gathered_means.size(0) != new_size || gathered_sh0.size(0) != new_size ||
                 gathered_scaling.size(0) != new_size || gathered_rotation.size(0) != new_size ||
@@ -2123,6 +2144,10 @@ namespace lfs::core {
             _scaling = std::move(new_scaling);
             _rotation = std::move(new_rotation);
             _opacity = std::move(new_opacity);
+            if (_shape.is_valid())
+                _shape = std::move(gathered_shape);
+            if (_shape_adam.is_valid())
+                _shape_adam = std::move(gathered_shape_adam);
 
             if (gathered_shN.is_valid()) {
                 _shN_value_bounds = Tensor{};

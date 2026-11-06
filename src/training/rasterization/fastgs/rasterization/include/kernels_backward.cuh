@@ -841,8 +841,10 @@ namespace fast_lfs::rasterization::kernels::backward {
     // The removal-impact walk keeps a colour composite per pixel live; at 8 blocks per SM it spills
     // on every fragment, at 6 it fits in registers and runs faster.
     // DISTORTION: adds the depth distortion loss gradients (FastGSDistortion); off = unchanged.
+    // SHAPE (--kernel-shape, LFQPLCYK): alpha = o exp(-1/2 d^beta), beta from the primitive colour's w; the conic / mean
+    // gradients through d^beta and dL/dbeta added to shape_grad[primitive] (when bound). Off = the unchanged kernels.
     template <DensificationType DENSIFICATION_TYPE, bool NORMAL_CHANNEL, bool IMPACT_SCORE, int WARP_CULL_MODE = 0,
-              bool DISTORTION = false>
+              bool DISTORTION = false, bool SHAPE = false>
     __global__ void __launch_bounds__(config::block_size_blend_backward, (IMPACT_SCORE || DISTORTION) ? 6 : 8) blend_backward_cu(
         const uint2* __restrict__ tile_instance_ranges,
         const uint* __restrict__ instance_primitive_indices,
@@ -880,7 +882,8 @@ namespace fast_lfs::rasterization::kernels::backward {
         const uint height,
         const uint grid_width,
         const int blend_batch_size_runtime,
-        const FastGSDistortion distortion) {
+        const FastGSDistortion distortion,
+        float* __restrict__ shape_grad) {
         (void)image;
         (void)alpha_map;
         auto block = cg::this_thread_block();
@@ -1097,6 +1100,7 @@ namespace fast_lfs::rasterization::kernels::backward {
         __shared__ unsigned char s_valid_splat[config::block_size_blend_backward];
         __shared__ ushort4 s_pixel_bbox[config::block_size_blend_backward];
         __shared__ float s_distortion_depth[DISTORTION ? config::block_size_blend_backward : 1];
+        __shared__ float s_beta[SHAPE ? config::block_size_blend_backward : 1];
         const bool stage_depth = grad_depth_map != nullptr;
 
         // Reverse walk: batch_base is reverse-order index into [0, T_eff).
@@ -1156,6 +1160,9 @@ namespace fast_lfs::rasterization::kernels::backward {
                     if constexpr (DISTORTION) {
                         s_distortion_depth[thread_rank] = distortion.depths[primitive_idx];
                     }
+                    if constexpr (SHAPE) {
+                        s_beta[thread_rank] = primitive_color[work_idx].w;
+                    }
                 } else {
                     s_prim_idx[thread_rank] = 0u;
                     s_work_idx[thread_rank] = 0u;
@@ -1170,6 +1177,9 @@ namespace fast_lfs::rasterization::kernels::backward {
                     }
                     if constexpr (DISTORTION) {
                         s_distortion_depth[thread_rank] = -1.0f;
+                    }
+                    if constexpr (SHAPE) {
+                        s_beta[thread_rank] = 2.0f;
                     }
                 }
             }
@@ -1191,13 +1201,17 @@ namespace fast_lfs::rasterization::kernels::backward {
                                        (static_cast<uint>(bb.w) > sub1_iy0);
                     const float4 co = s_conic_opacity[j_test];
                     const float3 conic_t = make_float3(co);
+                    float shape_beta_test = 2.0f;
+                    if constexpr (SHAPE) {
+                        shape_beta_test = s_beta[j_test];
+                    }
                     if (aabb0) {
                         hit0 = kernels::splat_overlaps_subtile_ellipse(
-                            s_mean2d[j_test], conic_t, co.w, sub0_x0, sub0_y0, sub_w, sub_h);
+                            s_mean2d[j_test], conic_t, co.w, sub0_x0, sub0_y0, sub_w, sub_h, shape_beta_test);
                     }
                     if (aabb1) {
                         hit1 = kernels::splat_overlaps_subtile_ellipse(
-                            s_mean2d[j_test], conic_t, co.w, sub1_x0, sub1_y0, sub_w, sub_h);
+                            s_mean2d[j_test], conic_t, co.w, sub1_x0, sub1_y0, sub_w, sub_h, shape_beta_test);
                     }
                 }
                 unsigned mask0 = __ballot_sync(0xffffffffu, hit0);
@@ -1229,6 +1243,10 @@ namespace fast_lfs::rasterization::kernels::backward {
                     const float4 conic_opacity = s_conic_opacity[j];
                     const float3 conic = make_float3(conic_opacity);
                     const float compensated_opacity = conic_opacity.w;
+                    float shape_beta = 2.0f; // --kernel-shape
+                    if constexpr (SHAPE) {
+                        shape_beta = s_beta[j];
+                    }
                     const float4 color_staged = s_color[j];
                     const float3 color = make_float3(color_staged);
                     const unsigned factor_bits = __float_as_uint(color_staged.w);
@@ -1250,6 +1268,7 @@ namespace fast_lfs::rasterization::kernels::backward {
 
                     BlendBackwardAccum accum = make_zero_blend_backward_accum();
                     float impact_sum = 0.0f;
+                    float shape_grad_acc = 0.0f; // --kernel-shape: dL/dbeta over this lane's pixels
                     float impact_peak = 0.0f;
                     bool has_contribution = false;
 
@@ -1270,7 +1289,12 @@ namespace fast_lfs::rasterization::kernels::backward {
                             conic.y * delta.x * delta.y;
                         if (!(sigma_over_2 >= 0.0f))
                             return;
-                        const float gaussian = __expf(-sigma_over_2);
+                        // --kernel-shape: the exponent 1/2 d^beta (sigma_over_2 itself for the Gaussian)
+                        float kernel_exponent = sigma_over_2;
+                        if constexpr (SHAPE) {
+                            kernel_exponent = kshape::exponent(sigma_over_2, shape_beta);
+                        }
+                        const float gaussian = __expf(-kernel_exponent);
                         const float unclamped_alpha = compensated_opacity * gaussian;
                         const float alpha = fminf(unclamped_alpha, config::max_fragment_alpha);
                         if (!(alpha >= c_splat_cutoff.min_alpha) || sigma_over_2 > c_splat_cutoff.half_z2_max)
@@ -1338,7 +1362,17 @@ namespace fast_lfs::rasterization::kernels::backward {
                             accum.normal_z += blending_weight * grad_n.z;
                         }
 
-                        const float gaussian_grad_helper = alpha_saturated ? 0.0f : -alpha * dL_dalpha;
+                        // dL/d(exponent); the exponent is sigma_over_2 itself for the Gaussian
+                        const float exponent_grad = alpha_saturated ? 0.0f : -alpha * dL_dalpha;
+                        float gaussian_grad_helper = exponent_grad; // dL/d(sigma_over_2)
+                        if constexpr (SHAPE) {
+                            // E = 1/2 (2 s)^(beta/2): dE/ds = beta E / (2 s), dE/dbeta = 1/2 d^beta ln d (kernel_shape.cuh)
+                            float dE_ds, dE_dbeta;
+                            kshape::exponent_grads(sigma_over_2, shape_beta, kernel_exponent, dE_ds, dE_dbeta);
+                            shape_grad_acc += exponent_grad * dE_dbeta;
+                            if (shape_beta != 2.0f)
+                                gaussian_grad_helper = exponent_grad * dE_ds;
+                        }
                         accum.conic_x += 0.5f * gaussian_grad_helper * delta.x * delta.x;
                         accum.conic_y += 0.5f * gaussian_grad_helper * delta.x * delta.y;
                         accum.conic_z += 0.5f * gaussian_grad_helper * delta.y * delta.y;
@@ -1416,7 +1450,15 @@ namespace fast_lfs::rasterization::kernels::backward {
                         if constexpr (DISTORTION) {
                             reduced_distortion_depth_grad = reduce_field(distortion_depth_grad);
                         }
+                        float reduced_shape_grad = 0.0f;
+                        if constexpr (SHAPE) {
+                            reduced_shape_grad = reduce_field(shape_grad_acc);
+                        }
                         if (lane_id == 0u) {
+                            if constexpr (SHAPE) {
+                                if (shape_grad != nullptr && reduced_shape_grad != 0.0f)
+                                    atomicAdd(&shape_grad[primitive_idx], clamp_grad(reduced_shape_grad));
+                            }
                             if constexpr (DISTORTION) {
                                 if (reduced_distortion_depth_grad != 0.0f)
                                     atomicAdd(&distortion.grad_depths[primitive_idx], clamp_grad(reduced_distortion_depth_grad));

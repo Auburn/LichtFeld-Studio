@@ -98,6 +98,7 @@ namespace fast_lfs::rasterization {
         const FastGSLens& lens = {},
         const FastGSDistortion& distortion = {},
         int screen_share_axis = 0, // radius max_screen_share measures: 0 longest axis, 1 area of the two longest (lfs/training/screen_share.cuh)
-        const FastGSRollingShutter& rs = {}); // dynamic rolling shutter (native fisheye); off unless rs.motion != nullptr
+        const FastGSRollingShutter& rs = {}, // dynamic rolling shutter (native fisheye); off unless rs.motion != nullptr
+        const float* shape_raw = nullptr);    // --kernel-shape (LFQPLCYK): raw r per primitive; nullptr = the Gaussian kernels
 
 } // namespace fast_lfs::rasterization

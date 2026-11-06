@@ -85,7 +85,9 @@ void fast_lfs::rasterization::backward(
     const FastGSLens& lens,
     const FastGSDistortion& distortion,
     const FastGSRollingShutter& rs,
-    float* pose_grad) {
+    float* pose_grad,
+    const float* shape_raw,
+    float* shape_grad) {
     if (pose_grad != nullptr && lens.model != kLensFisheye)
         throw std::runtime_error("FastGS backward: the pose gradient (--pose-opt) is implemented for the native fisheye lens only");
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
@@ -112,8 +114,8 @@ void fast_lfs::rasterization::backward(
         // DensificationType::None and no normal channel, so those two stay off the
         // production nest.
         auto launch_blend_backward_variant =
-            [&]<DensificationType DENS_TYPE, bool NORMAL_CHANNEL, bool IMPACT_SCORE, int WARP_CULL_MODE, bool DISTORTION>() {
-                kernels::backward::blend_backward_cu<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, WARP_CULL_MODE, DISTORTION>
+            [&]<DensificationType DENS_TYPE, bool NORMAL_CHANNEL, bool IMPACT_SCORE, int WARP_CULL_MODE, bool DISTORTION, bool SHAPE>() {
+                kernels::backward::blend_backward_cu<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, WARP_CULL_MODE, DISTORTION, SHAPE>
                     <<<n_tiles, config::block_size_blend_backward, 0, stream>>>(
                         per_tile_buffers.instance_ranges,
                         sorted_primitive_indices,
@@ -151,19 +153,28 @@ void fast_lfs::rasterization::backward(
                         height,
                         grid.x,
                         blend_batch_override,
-                        distortion);
+                        distortion,
+                        SHAPE ? shape_grad : nullptr);
                 LFS_CUDA_LAUNCH_CHECK(stream, "fastgs.backward.blend_backward");
             };
         // The distortion variant only when the forward bound its buffers; otherwise the unchanged kernels.
         auto launch_blend_backward_typed =
             [&]<DensificationType DENS_TYPE, bool NORMAL_CHANNEL, bool IMPACT_SCORE, int WARP_CULL_MODE>() {
                 if constexpr (WARP_CULL_MODE == 0) {
+                    // --kernel-shape (LFQPLCYK): its own instantiations (production warp cull only)
+                    if (shape_raw != nullptr) {
+                        if (distortion.moments != nullptr)
+                            launch_blend_backward_variant.template operator()<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, 0, true, true>();
+                        else
+                            launch_blend_backward_variant.template operator()<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, 0, false, true>();
+                        return;
+                    }
                     if (distortion.moments != nullptr) {
-                        launch_blend_backward_variant.template operator()<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, 0, true>();
+                        launch_blend_backward_variant.template operator()<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, 0, true, false>();
                         return;
                     }
                 }
-                launch_blend_backward_variant.template operator()<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, WARP_CULL_MODE, false>();
+                launch_blend_backward_variant.template operator()<DENS_TYPE, NORMAL_CHANNEL, IMPACT_SCORE, WARP_CULL_MODE, false, false>();
             };
         auto launch_production = [&]<DensificationType DENS_TYPE>() {
             const bool impact_score = impact_sum_out != nullptr;

@@ -92,6 +92,9 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--loss-ycc-chroma-weight", "loss_ycc_chroma_weight", Float},
             OptimizationCliBinding{"--loss-ycc-luma-scale", "loss_ycc_luma_scale", Float},
             OptimizationCliBinding{"--max-std-dev", "max_std_dev", Float},
+            OptimizationCliBinding{"--kernel-shape", "kernel_shape", Bool},
+            OptimizationCliBinding{"--kernel-shape-lr", "kernel_shape_lr", Float},
+            OptimizationCliBinding{"--kernel-shape-start", "kernel_shape_start", Integer},
             OptimizationCliBinding{"--pose-lr-deg", "pose_lr_deg", Float},
             OptimizationCliBinding{"--pose-lr-units", "pose_lr_units", Float},
             OptimizationCliBinding{"--pose-opt-start", "pose_opt_start", Integer},
@@ -892,6 +895,9 @@ namespace {
             ::args::ValueFlag<float> loss_ycc_chroma_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--loss-ycc-chroma-weight"), {"loss-ycc-chroma-weight"});
             ::args::ValueFlag<float> loss_ycc_luma_scale(training_group, "scale", lfs::core::args::optimization_cli_help("--loss-ycc-luma-scale"), {"loss-ycc-luma-scale"});
             ::args::ValueFlag<float> max_std_dev(training_group, "sigmas", lfs::core::args::optimization_cli_help("--max-std-dev"), {"max-std-dev"});
+            ::args::Flag kernel_shape(training_group, "enabled", lfs::core::args::optimization_cli_help("--kernel-shape"), {"kernel-shape"});
+            ::args::ValueFlag<float> kernel_shape_lr(training_group, "lr", lfs::core::args::optimization_cli_help("--kernel-shape-lr"), {"kernel-shape-lr"});
+            ::args::ValueFlag<int> kernel_shape_start(training_group, "iter", lfs::core::args::optimization_cli_help("--kernel-shape-start"), {"kernel-shape-start"});
             ::args::ValueFlag<float> pose_lr_deg(training_group, "deg", lfs::core::args::optimization_cli_help("--pose-lr-deg"), {"pose-lr-deg"});
             ::args::ValueFlag<float> pose_lr_units(training_group, "units", lfs::core::args::optimization_cli_help("--pose-lr-units"), {"pose-lr-units"});
             ::args::ValueFlag<int> pose_opt_start(training_group, "iter", lfs::core::args::optimization_cli_help("--pose-opt-start"), {"pose-opt-start"});
@@ -1576,6 +1582,9 @@ namespace {
                                   ::args::get(rs_readout_ms) > 100.0f)) {
                 return std::unexpected("ERROR: --rs-readout-ms must be within [0, 100]");
             }
+            if (kernel_shape_start && ::args::get(kernel_shape_start) < 0) {
+                return std::unexpected("ERROR: --kernel-shape-start must be >= 0");
+            }
             if (rs_learn_start && ::args::get(rs_learn_start) < 0) {
                 return std::unexpected("ERROR: --rs-learn-start must be >= 0");
             }
@@ -1732,6 +1741,9 @@ namespace {
                                         loss_ycc_chroma_weight_val = cli_option_present({"--loss-ycc-chroma-weight"}) ? std::optional<float>(::args::get(loss_ycc_chroma_weight)) : std::optional<float>(),
                                         loss_ycc_luma_scale_val = cli_option_present({"--loss-ycc-luma-scale"}) ? std::optional<float>(::args::get(loss_ycc_luma_scale)) : std::optional<float>(),
                                         max_std_dev_val = cli_option_present({"--max-std-dev"}) ? std::optional<float>(::args::get(max_std_dev)) : std::optional<float>(),
+                                        kernel_shape_flag = bool(kernel_shape),
+                                        kernel_shape_lr_val = cli_option_present({"--kernel-shape-lr"}) ? std::optional<float>(::args::get(kernel_shape_lr)) : std::optional<float>(),
+                                        kernel_shape_start_val = cli_option_present({"--kernel-shape-start"}) ? std::optional<int>(::args::get(kernel_shape_start)) : std::optional<int>(),
                                         pose_lr_deg_val = cli_option_present({"--pose-lr-deg"}) ? std::optional<float>(::args::get(pose_lr_deg)) : std::optional<float>(),
                                         pose_lr_units_val = cli_option_present({"--pose-lr-units"}) ? std::optional<float>(::args::get(pose_lr_units)) : std::optional<float>(),
                                         pose_opt_start_val = cli_option_present({"--pose-opt-start"}) ? std::optional<int>(::args::get(pose_opt_start)) : std::optional<int>(),
@@ -1967,6 +1979,11 @@ namespace {
                 setVal(loss_ycc_chroma_weight_val, opt.loss_ycc_chroma_weight);
                 setVal(loss_ycc_luma_scale_val, opt.loss_ycc_luma_scale);
                 setVal(max_std_dev_val, opt.max_std_dev);
+                if (kernel_shape_flag)
+                    opt.kernel_shape = true;
+                setVal(kernel_shape_lr_val, opt.kernel_shape_lr);
+                if (kernel_shape_start_val)
+                    opt.kernel_shape_start = static_cast<size_t>(*kernel_shape_start_val);
                 setVal(pose_lr_deg_val, opt.pose_lr_deg);
                 setVal(pose_lr_units_val, opt.pose_lr_units);
                 if (pose_opt_start_val)
@@ -2182,6 +2199,9 @@ namespace {
                 note_opt("loss_ycc_chroma_weight", loss_ycc_chroma_weight_val.has_value());
                 note_opt("loss_ycc_luma_scale", loss_ycc_luma_scale_val.has_value());
                 note_opt("max_std_dev", max_std_dev_val.has_value());
+                note_opt("kernel_shape", kernel_shape_flag);
+                note_opt("kernel_shape_lr", kernel_shape_lr_val.has_value());
+                note_opt("kernel_shape_start", kernel_shape_start_val.has_value());
                 note_opt("pose_lr_deg", pose_lr_deg_val.has_value());
                 note_opt("pose_lr_units", pose_lr_units_val.has_value());
                 note_opt("pose_opt_start", pose_opt_start_val.has_value());

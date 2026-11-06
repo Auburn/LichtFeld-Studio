@@ -12,6 +12,7 @@
 #include "lfs/training/screen_share.cuh"
 #include "rasterization_config.h"
 #include "splat_cutoff.cuh"
+#include "kernel_shape.cuh" // --kernel-shape (LFQPLCYK)
 #include "utils.h"
 
 #include <cuda_fp16.h>
@@ -1280,10 +1281,12 @@ namespace fast_lfs::rasterization::kernels {
         const float sub_x0,
         const float sub_y0,
         const float sub_w,
-        const float sub_h) {
+        const float sub_h,
+        const float shape_beta = 2.0f) { // --kernel-shape: the splat's beta (2 = the Gaussian, unchanged code)
         if (!(opacity >= c_splat_cutoff.min_alpha))
             return false;
-        const float power_threshold = splat_power_threshold(opacity); // --max-std-dev: capped by the cut
+        // --max-std-dev: capped by the cut; --kernel-shape: the 1/2 d^beta = P contour as a d^2/2 radius
+        const float power_threshold = kshape::power_threshold(splat_power_threshold(opacity), shape_beta);
         // Continuous box of pixel centers in mean-relative coordinates.
         const float x0 = (sub_x0 + 0.5f) - mean2d.x;
         const float x1 = (sub_x0 + sub_w - 0.5f) - mean2d.x;

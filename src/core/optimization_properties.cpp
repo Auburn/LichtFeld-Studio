@@ -372,6 +372,25 @@ namespace lfs::core::param {
             .ui_step(0.1)
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .bool_prop(&OptimizationParameters::kernel_shape,
+                       "kernel_shape", "Kernel Shape (per splat)", d.kernel_shape,
+                       "Per-splat trainable kernel shape (a generalized Gaussian): alpha = opacity x exp(-1/2 d^beta), d the Mahalanobis distance in the 2D conic, beta = 1 + 7 sigmoid(r - ln 6) in [1, 8] learned per splat from 2 (the Gaussian); beta > 2 flat top and sharp edge, beta < 2 a peak with long tails; the tile extent follows (2 ln(255 opacity))^(1/beta); exported as the PLY vertex property 'shape'; standard rasterizer, MRNF; not with --max-std-dev, --enable-mip or --enable-sparsity")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::kernel_shape_lr,
+                        "kernel_shape_lr", "Kernel Shape Learning Rate", d.kernel_shape_lr, 0.0f, 1.0f,
+                        "Adam learning rate of the raw shape r (beta = 1 + 7 sigmoid(r - ln 6); d beta / d r = 6/7 at beta 2); 0 freezes beta at 2")
+            .precision(5)
+            .ui_step(0.001)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .size_prop(&OptimizationParameters::kernel_shape_start,
+                       "kernel_shape_start", "Kernel Shape Start", d.kernel_shape_start, 0, 1000000,
+                       "Iteration from which the kernel shape is learned (before it: beta stays where it is)")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .bool_prop(&OptimizationParameters::pose_opt,
                        "pose_opt", "Camera Pose Refinement", d.pose_opt,
                        "Refine every training camera's pose during training (--native-fisheye standard rasterizer, with or without the rolling shutter; not --gut): a per-camera Adam step of its rotation and camera-centre offset after each of its renders; writes <output>/cameras_refined (COLMAP text, the splat's frame) and pose_refinement.tsv")

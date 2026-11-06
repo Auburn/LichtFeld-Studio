@@ -413,6 +413,8 @@ namespace lfs::training {
             const auto header_pos = destination.tellp();
             if (save_popspa)
                 header.flags = header.flags | CheckpointFlags::HAS_POPSPA;
+            if (model._shape.is_valid() && model._shape_adam.is_valid())
+                header.flags = header.flags | CheckpointFlags::HAS_KERNEL_SHAPE;
             // Only POPSpa state needs the newer layout; keep other checkpoints
             // readable by builds that predate it.
             header.version = save_popspa ? lfs::core::CHECKPOINT_VERSION_HAS_POPSPA
@@ -472,6 +474,17 @@ namespace lfs::training {
                 if (!serialized)
                     return std::move(serialized).error();
                 popspa_optimizer->serialize(destination);
+            }
+            if (model._shape.is_valid() && model._shape_adam.is_valid()) {
+                // --kernel-shape (LFQPLCYK): "LFKS" v1, Adam step, raw r [N], Adam moments [N, 2]. The model's own tensors
+                // are written (no temporary copies): the snapshot service plans each tensor by its source and checks it.
+                const uint32_t shape_magic = 0x4C464B53u, shape_version = 1u;
+                const int64_t shape_step = model._shape_step;
+                destination.write(reinterpret_cast<const char*>(&shape_magic), sizeof(shape_magic));
+                destination.write(reinterpret_cast<const char*>(&shape_version), sizeof(shape_version));
+                destination.write(reinterpret_cast<const char*>(&shape_step), sizeof(shape_step));
+                destination << model._shape;
+                destination << model._shape_adam;
             }
 
             const auto params_pos = destination.tellp();
@@ -917,6 +930,27 @@ namespace lfs::training {
                 LOG_WARN("Checkpoint was saved during opacity ADMM sparsification, which is no longer supported; "
                          "resuming without sparsification");
                 loaded_params.optimization.enable_sparsity = false;
+            }
+
+            // --kernel-shape (LFQPLCYK): the per-splat shape state
+            if (has_flag(header.flags, CheckpointFlags::HAS_KERNEL_SHAPE)) {
+                uint32_t shape_magic = 0, shape_version = 0;
+                int64_t shape_step = 0;
+                lfs::core::serialization_detail::read_exact(file, &shape_magic, sizeof(shape_magic), "kernel-shape magic");
+                lfs::core::serialization_detail::read_exact(file, &shape_version, sizeof(shape_version), "kernel-shape version");
+                lfs::core::serialization_detail::read_exact(file, &shape_step, sizeof(shape_step), "kernel-shape step");
+                if (shape_magic != 0x4C464B53u || shape_version != 1u)
+                    throw std::runtime_error("Invalid checkpoint: unsupported kernel-shape section");
+                lfs::core::Tensor shape_raw, shape_adam;
+                file >> shape_raw;
+                file >> shape_adam;
+                if (static_cast<size_t>(shape_raw.numel()) != static_cast<size_t>(loaded_model.size()) ||
+                    shape_adam.numel() != 2 * shape_raw.numel())
+                    throw std::runtime_error("Invalid checkpoint: the kernel-shape state does not match the model count");
+                loaded_model._shape = shape_raw.cuda();
+                loaded_model._shape_adam = shape_adam.cuda();
+                loaded_model._shape_step = shape_step;
+                LOG_INFO("Checkpoint: per-splat kernel shape restored ({} splats, Adam step {})", shape_raw.numel(), shape_step);
             }
 
             // Reserve capacity for densification after the checkpoint params are resolved.

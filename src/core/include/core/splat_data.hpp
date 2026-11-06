@@ -504,6 +504,14 @@ namespace lfs::core {
         Tensor _densification_info;
         // Per-splat max screen-share over the current refine window. [N] fp32.
         Tensor _max_screen_share;
+        // --kernel-shape (LFQPLCYK; training/kernel_shape.hpp, core/kernel_shape_map.hpp): the optional per-splat kernel
+        // shape. _shape [N] fp32 raw r (beta = 1 + 7 sigmoid(r - ln 6); r = 0 -> beta = 2 exactly), _shape_adam [N, 2] its
+        // Adam moments, _shape_step the Adam steps taken. Invalid = the Gaussian (every model without it). Every FastGS
+        // render of a model carrying _shape draws its beta; PLY export writes beta as the vertex property `shape`, import
+        // reads it back; checkpoints carry all three.
+        Tensor _shape;
+        Tensor _shape_adam;
+        std::int64_t _shape_step = 0;
 
         // Optional LOD tree (populated by RAD loader, null for training/non-RAD scenes)
         std::unique_ptr<SplatLodTree> lod_tree;

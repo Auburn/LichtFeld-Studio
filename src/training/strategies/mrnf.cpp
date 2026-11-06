@@ -22,6 +22,7 @@
 #include "lfs/training/perf_bench.hpp"
 #include "lfs/training/sh_value_storage.hpp"
 #include "strategy_utils.hpp"
+#include "kernel_shape.hpp"
 #include "training/dataset.hpp"
 #include <algorithm>
 #include <cassert>
@@ -1212,6 +1213,7 @@ namespace lfs::training {
         reset_optimizer_state_at_indices(*_optimizer, ParamType::Scaling, indices);
         reset_optimizer_state_at_indices(*_optimizer, ParamType::Rotation, indices);
         reset_optimizer_state_at_indices(*_optimizer, ParamType::Opacity, indices);
+        lfs::training::kernel_shape_rows::reset_adam(*_splat_data, indices); // --kernel-shape
     }
 
     bool MRNF::growth_exchange_active(const int iter) const {
@@ -1791,6 +1793,7 @@ namespace lfs::training {
         reset_optimizer_state_at_indices(*_optimizer, ParamType::Scaling, split_indices);
         reset_optimizer_state_at_indices(*_optimizer, ParamType::Rotation, split_indices);
         reset_optimizer_state_at_indices(*_optimizer, ParamType::Opacity, split_indices);
+        lfs::training::kernel_shape_rows::reset_adam(*_splat_data, split_indices); // --kernel-shape: as the other params
 
         // Children are staged in canonical fp32 (the SH rest dominates). Large
         // growth events are split into chunks so the staging rows and the SH
@@ -1873,6 +1876,8 @@ namespace lfs::training {
             }
 
             size_t append_start = 0;
+            // --kernel-shape: each child takes its parent's raw r (fresh Adam moments, as for every other parameter)
+            const lfs::core::Tensor child_shape = lfs::training::kernel_shape_rows::gather_raw(*_splat_data, chunk_indices);
             lfs::training::sh_value::ShNMutationBatch shn_batch(*_splat_data);
             if (free_count() > 0) {
                 auto [filled_indices, remaining_after_fill] = fill_free_slots_with_data(
@@ -1885,9 +1890,10 @@ namespace lfs::training {
                     static_cast<int64_t>(count),
                     &shn_batch);
                 append_start = count - static_cast<size_t>(remaining_after_fill);
+                lfs::training::kernel_shape_rows::fill(*_splat_data, filled_indices, child_shape);
             }
 
-            n_append += append_child_rows(
+            const size_t appended = append_child_rows(
                 child_means,
                 child_rotations,
                 child_log_scales,
@@ -1897,6 +1903,9 @@ namespace lfs::training {
                 append_start,
                 count,
                 &shn_batch);
+            n_append += appended;
+            if (appended > 0)
+                lfs::training::kernel_shape_rows::append(*_splat_data, child_shape, append_start, append_start + appended);
             clear_rendered_support(chunk_indices);
             shn_batch.flush();
             reused += append_start;
@@ -2014,6 +2023,8 @@ namespace lfs::training {
         compact(_splat_data->scaling_raw());
         compact(_splat_data->rotation_raw());
         compact(_splat_data->opacity_raw());
+        compact(_splat_data->_shape); // --kernel-shape (no-ops without a shape state)
+        compact(_splat_data->_shape_adam);
 
         static constexpr ParamType ALL_PARAMS[] = {
             ParamType::Means, ParamType::Sh0, ParamType::ShN,
@@ -2671,7 +2682,10 @@ namespace lfs::training {
         auto [filled, remaining_after_fill] = fill_free_slots_with_data(
             pos, rot, scl, sh0_t, shN, opa, static_cast<int64_t>(count), &shn_batch);
         const size_t append_start = count - static_cast<size_t>(remaining_after_fill);
-        append_child_rows(pos, rot, scl, sh0_t, shN, opa, append_start, count, &shn_batch);
+        lfs::training::kernel_shape_rows::fill(*_splat_data, filled, lfs::core::Tensor()); // --kernel-shape: seeds start at beta 2
+        const size_t seeds_appended = append_child_rows(pos, rot, scl, sh0_t, shN, opa, append_start, count, &shn_batch);
+        if (seeds_appended > 0)
+            lfs::training::kernel_shape_rows::append(*_splat_data, lfs::core::Tensor(), append_start, append_start + seeds_appended);
         shn_batch.flush();
         LOG_INFO("MRNF: added {} blob seeds", count);
         LFS_COUNTER_ADD("strategy.mrnf.blob_seed", count);

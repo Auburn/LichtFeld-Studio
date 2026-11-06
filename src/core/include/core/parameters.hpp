@@ -274,6 +274,13 @@ namespace lfs::core {
             // X standard deviations (Mahalanobis, in the dilated 2D covariance) and above alpha 0.5/255; the tile radius
             // shrinks to match. 0 = off (the trainer's own ~3-sigma, alpha >= 1/255 extent). The game: sqrt(5) = 2.2360680.
             float max_std_dev = 0.0f;
+            // --kernel-shape (LFQPLCYK): a per-splat trainable kernel shape, alpha = o exp(-1/2 d^beta) with d the
+            // Mahalanobis distance in the 2D conic and beta = 1 + 7 sigmoid(r - ln 6) in (1, 8), r = 0 -> beta = 2 (the
+            // Gaussian) at the start; r has its own Adam (kernel_shape_lr) from iteration kernel_shape_start on.
+            // Exported as the PLY vertex property `shape` (beta). Standard (FastGS) rasterizer, MRNF only.
+            bool kernel_shape = false;
+            float kernel_shape_lr = 0.005f;
+            size_t kernel_shape_start = 0;
             float min_opacity = 0.005f;
             size_t refine_every = 100;
             size_t start_refine = 500;

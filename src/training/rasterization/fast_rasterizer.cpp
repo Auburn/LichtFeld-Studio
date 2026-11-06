@@ -429,7 +429,8 @@ namespace lfs::training {
         const FastGSDistortionOptions& distortion_options,
         int screen_share_axis,
         const fast_lfs::rasterization::FastGSRollingShutter& rolling_shutter,
-        const fast_lfs::rasterization::FastGSPose& pose) {
+        const fast_lfs::rasterization::FastGSPose& pose,
+        float* kernel_shape_grad) {
         // --lens-radial (LFRL): refuse a camera that is not the table's camera here, before the crash-dump block below
         // (the trainer checks every camera at start, so this only catches other callers)
         if (const RadialLensTable* const rl = active_radial_lens(); rl != nullptr && viewpoint_camera.camera_model_type() == core::CameraModelType::FISHEYE)
@@ -491,6 +492,24 @@ namespace lfs::training {
                 .detail = "n_primitives is 0 - model has no gaussians",
                 .detection = LFS_SOURCE_SITE_CURRENT(),
             }));
+        }
+        // --kernel-shape (LFQPLCYK): the model's per-splat beta (raw r) in every FastGS render of it
+        fast_lfs::rasterization::FastGSKernelShape kernel_shape{};
+        if (gaussian_model._shape.is_valid()) {
+            if (gaussian_model._shape.numel() != static_cast<size_t>(n_primitives) ||
+                gaussian_model._shape.device() != lfs::core::Device::CUDA ||
+                gaussian_model._shape.dtype() != lfs::core::DataType::Float32) {
+                return std::unexpected(lfs::make_error(lfs::ErrorInit{
+                    .code = lfs::ErrorCode::InvalidArgument,
+                    .domain = lfs::ErrorDomain::Rendering,
+                    .user_message = "The model's kernel shape does not match its splats.",
+                    .detail = std::format("SplatData::_shape has {} values for {} splats (or is not CUDA float32)",
+                                          gaussian_model._shape.numel(), n_primitives),
+                    .detection = LFS_SOURCE_SITE_CURRENT(),
+                }));
+            }
+            kernel_shape.raw = gaussian_model._shape.ptr<float>();
+            kernel_shape.grad = kernel_shape_grad;
         }
 
         // Pre-allocate output tensors (reused across iterations)
@@ -656,7 +675,8 @@ namespace lfs::training {
                 fastgs_lens_for_camera(viewpoint_camera),
                 distortion,
                 screen_share_axis,
-                rolling_shutter);
+                rolling_shutter,
+                kernel_shape);
         } catch (const std::exception& e) {
             // Dump all input data for debugging
             dump_crash_data(

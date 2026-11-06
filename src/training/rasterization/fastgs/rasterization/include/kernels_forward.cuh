@@ -47,7 +47,8 @@ namespace fast_lfs::rasterization::kernels::forward {
         return (static_cast<InstanceKey>(tile_key) << kInstanceDepthBits) | static_cast<InstanceKey>(depth_key);
     }
 
-    template <bool FISHEYE, bool RS = false, bool RADIAL = false>
+    // SHAPE (--kernel-shape, LFQPLCYK): beta from shape_raw drives the bounds; off = the unchanged kernels
+    template <bool FISHEYE, bool RS = false, bool RADIAL = false, bool SHAPE = false>
     __global__ void preprocess_cu(
         const float3* __restrict__ means,
         const float3* __restrict__ raw_scales,
@@ -94,7 +95,8 @@ namespace fast_lfs::rasterization::kernels::forward {
         const FastGSLens lens,
         const FastGSDistortion distortion,
         const int screen_share_axis, // lfs::training::kScreenShareAxisMax / kScreenShareAxisArea
-        const FastGSRollingShutter rs) { // rolling shutter (RS only)
+        const FastGSRollingShutter rs, // rolling shutter (RS only)
+        const float* __restrict__ shape_raw) { // --kernel-shape (LFQPLCYK): raw r per primitive, nullptr = the Gaussian
         static_assert(!RS || FISHEYE, "the rolling shutter is implemented for the native fisheye path");
         (void)w;
         (void)h;
@@ -270,7 +272,10 @@ namespace fast_lfs::rasterization::kernels::forward {
         const float3 conic = make_float3(cov2d.z * det_rcp, -cov2d.y * det_rcp, cov2d.x * det_rcp);
 
         // Compute bounds
-        const float power_threshold = splat_power_threshold(output_opacity); // --max-std-dev: min(cut, alpha contour)
+        // --kernel-shape (LFQPLCYK): beta from the raw r; every bound below uses the alpha = 1/255 contour of
+        // 1/2 d^beta as a d^2/2 radius (kshape::power_threshold; P itself for beta = 2 and without the shape)
+        const float shape_beta = (SHAPE && shape_raw != nullptr) ? kshape::beta_from_raw(shape_raw[primitive_idx]) : 2.0f;
+        const float power_threshold = kshape::power_threshold(splat_power_threshold(output_opacity), shape_beta); // --max-std-dev: min(cut, alpha contour)
         const float power_threshold_factor = sqrtf(2.0f * power_threshold);
         float extent_x = fmaxf(power_threshold_factor * sqrtf(cov2d.x) - 0.5f, 0.0f);
         float extent_y = fmaxf(power_threshold_factor * sqrtf(cov2d.z) - 0.5f, 0.0f);
@@ -343,7 +348,8 @@ namespace fast_lfs::rasterization::kernels::forward {
             mean3d, cam_position[0],
             primitive_idx, active_sh_bases, sh_layout_slots,
             sh_value_bounds, sh_value_n_cells, sh_value_bits);
-        primitive_color[work_idx] = make_float4(sh_color, 0.0f);
+        // w: beta under --kernel-shape (read by create_instances and both blends), 0 otherwise (unused)
+        primitive_color[work_idx] = make_float4(sh_color, (SHAPE && shape_raw != nullptr) ? shape_beta : 0.0f);
         primitive_depth_keys[work_idx] = depth_sort_key(depth);
         primitive_depths[work_idx] = depth;
 
@@ -516,7 +522,8 @@ namespace fast_lfs::rasterization::kernels::forward {
         FastGSForwardStatus* __restrict__ status,
         const uint grid_width,
         const uint n_visible,
-        const uint max_instances) {
+        const uint max_instances,
+        const float4* __restrict__ shape_color) { // --kernel-shape: the per-primitive colours (w = beta), nullptr = off
         uint idx = cg::this_grid().thread_rank();
 
         bool active = idx < n_visible;
@@ -555,7 +562,9 @@ namespace fast_lfs::rasterization::kernels::forward {
         const float2 mean2d_shifted = active ? primitive_mean2d[work_idx].mean2d - 0.5f : make_float2(0.0f, 0.0f);
         const float4 conic_opacity_loaded = active ? primitive_conic_opacity[work_idx] : make_float4(0.0f, 0.0f, 0.0f, c_splat_cutoff.min_alpha);
         const float3 conic = make_float3(conic_opacity_loaded);
-        const float power_threshold_precomputed = splat_power_threshold(conic_opacity_loaded.w);
+        // --kernel-shape: the same contour radius the preprocess counted the tiles with (beta from the colour's w)
+        const float power_threshold_precomputed = kshape::power_threshold(
+            splat_power_threshold(conic_opacity_loaded.w), (shape_color != nullptr && active) ? shape_color[work_idx].w : 2.0f);
         const float radius_sq = 2.0f * power_threshold_precomputed;
 
         uint current_write_offset = work_idx == 0 ? 0 : static_cast<uint>(primitive_offsets[work_idx - 1]);
@@ -663,7 +672,8 @@ namespace fast_lfs::rasterization::kernels::forward {
     //                 2 = deliberately incorrect empty mask for negative coverage.
     // blend_batch_size_runtime: multiple of 32 in [32, block_size_blend_forward]; 0 → config default.
     // kDistortion: also accumulates the depth distortion loss (FastGSDistortion); off = unchanged.
-    template <bool kRenderNormal, bool kRenderDepth, bool kDistortion = false>
+    // kShape (--kernel-shape, LFQPLCYK): alpha = o exp(-1/2 d^beta), beta from the primitive colour's w; off = unchanged.
+    template <bool kRenderNormal, bool kRenderDepth, bool kDistortion = false, bool kShape = false>
     __global__ void __launch_bounds__(config::block_size_blend_forward) blend_cu(
         const uint2* __restrict__ tile_instance_ranges,
         const uint* __restrict__ instance_primitive_indices,
@@ -754,6 +764,7 @@ namespace fast_lfs::rasterization::kernels::forward {
         __shared__ float collected_depth[config::block_size_blend_forward];
         __shared__ float3 collected_normal[kRenderNormal ? config::block_size_blend_forward : 1];
         __shared__ float collected_distortion_depth[kDistortion ? config::block_size_blend_forward : 1];
+        __shared__ float collected_beta[kShape ? config::block_size_blend_forward : 1];
 
         float3 color_pixel0 = make_float3(0.0f);
         float3 color_pixel1 = make_float3(0.0f);
@@ -803,6 +814,9 @@ namespace fast_lfs::rasterization::kernels::forward {
                     // exact opacity*exp test.
                     collected_color[thread_rank] = make_float4(
                         clamped, splat_power_threshold(conic_opacity.w));
+                    if constexpr (kShape) {
+                        collected_beta[thread_rank] = raw_c.w;
+                    }
                     collected_depth[thread_rank] = primitive_depths[work_idx];
                     if constexpr (kRenderNormal) {
                         collected_normal[thread_rank] = primitive_normals[work_idx];
@@ -877,13 +891,23 @@ namespace fast_lfs::rasterization::kernels::forward {
                     // exact test below.
                     constexpr float kLogAlphaGateEps = 1.0e-5f;
                     const float log_alpha_pt = c.w;
+                    float shape_beta_j = 2.0f;
+                    if constexpr (kShape) {
+                        shape_beta_j = collected_beta[j];
+                    }
 
                     if (hit0) {
                         const float2 delta = mean2d - pixel0;
                         const float sigma_over_2 = (conic.x * delta.x * delta.x + conic.z * delta.y * delta.y) + conic.y * delta.x * delta.y;
-                        if (!(sigma_over_2 < 0.0f) && !(sigma_over_2 > log_alpha_pt + kLogAlphaGateEps)) {
+                        // --kernel-shape: the exponent 1/2 d^beta (sigma_over_2 = 1/2 d^2 itself for the Gaussian)
+                        float kernel_exponent = sigma_over_2;
+                        if constexpr (kShape) {
+                            if (!(sigma_over_2 < 0.0f))
+                                kernel_exponent = kshape::exponent(sigma_over_2, shape_beta_j);
+                        }
+                        if (!(sigma_over_2 < 0.0f) && !(kernel_exponent > log_alpha_pt + kLogAlphaGateEps)) {
                             // __expf: -6.7% blend kernel time vs expf at equal 30k PSNR/SSIM (bonsai A/B).
-                            const float gaussian = __expf(-sigma_over_2);
+                            const float gaussian = __expf(-kernel_exponent);
                             const float alpha = fminf(opacity * gaussian, config::max_fragment_alpha);
                             if (!(alpha < c_splat_cutoff.min_alpha) && !(sigma_over_2 > c_splat_cutoff.half_z2_max)) {
                                 const float weight = transmittance0 * alpha;
@@ -914,8 +938,14 @@ namespace fast_lfs::rasterization::kernels::forward {
                     if (hit1) {
                         const float2 delta = mean2d - pixel1;
                         const float sigma_over_2 = (conic.x * delta.x * delta.x + conic.z * delta.y * delta.y) + conic.y * delta.x * delta.y;
-                        if (!(sigma_over_2 < 0.0f) && !(sigma_over_2 > log_alpha_pt + kLogAlphaGateEps)) {
-                            const float gaussian = __expf(-sigma_over_2);
+                        // --kernel-shape: the exponent 1/2 d^beta (sigma_over_2 = 1/2 d^2 itself for the Gaussian)
+                        float kernel_exponent = sigma_over_2;
+                        if constexpr (kShape) {
+                            if (!(sigma_over_2 < 0.0f))
+                                kernel_exponent = kshape::exponent(sigma_over_2, shape_beta_j);
+                        }
+                        if (!(sigma_over_2 < 0.0f) && !(kernel_exponent > log_alpha_pt + kLogAlphaGateEps)) {
+                            const float gaussian = __expf(-kernel_exponent);
                             const float alpha = fminf(opacity * gaussian, config::max_fragment_alpha);
                             if (!(alpha < c_splat_cutoff.min_alpha) && !(sigma_over_2 > c_splat_cutoff.half_z2_max)) {
                                 const float weight = transmittance1 * alpha;

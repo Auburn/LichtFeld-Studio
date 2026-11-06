@@ -45,6 +45,14 @@ namespace fast_lfs::rasterization {
         float* grad = nullptr;               // device [6] optional: dL/d(dr, dd) is added (caller zeros)
     };
 
+    // --kernel-shape (LFQPLCYK): per-splat trainable kernel shape, alpha = o exp(-1/2 d^beta) (kernel_shape.cuh).
+    // raw: device [N] raw r (beta = 1 + 7 sigmoid(r - ln 6); null = the Gaussian, the unchanged kernels);
+    // grad: device [N], optional: the backward adds dL/dbeta (caller zeros).
+    struct FastGSKernelShape {
+        const float* raw = nullptr;
+        float* grad = nullptr;
+    };
+
     struct ForwardContext {
         void* per_primitive_buffers = nullptr;
         void* per_tile_buffers = nullptr;
@@ -69,6 +77,9 @@ namespace fast_lfs::rasterization {
         // --pose-opt: device [6] the backward adds dL/d(left perturbation of the w2c) to (null = off; FastGSPose). Set by
         // the caller after the forward (fast_rasterize_forward from its pose argument); native fisheye only.
         float* pose_grad = nullptr;
+        // --kernel-shape: what the forward drew with (FastGSKernelShape); the backward differentiates the same kernel
+        const float* shape_raw = nullptr;
+        float* shape_grad = nullptr;
         uint64_t frame_id = 0;
         // The stream all of this context's kernels/allocations are ordered on;
         // releases (sorted indices, arena frame, helper buffers) must use it.
@@ -130,7 +141,8 @@ namespace fast_lfs::rasterization {
         const FastGSLens& lens = {},               // pinhole unless lens.model == kLensFisheye
         const FastGSDistortion& distortion = {},  // depth distortion loss; off unless distortion.moments != nullptr
         int screen_share_axis = 0,                // radius max_screen_share_ptr measures: 0 longest axis, 1 area of the two longest
-        const FastGSRollingShutter& rs = {});     // dynamic rolling shutter (native fisheye); off unless rs.motion != nullptr
+        const FastGSRollingShutter& rs = {},      // dynamic rolling shutter (native fisheye); off unless rs.motion != nullptr
+        const FastGSKernelShape& shape = {});     // --kernel-shape (LFQPLCYK); off unless shape.raw != nullptr
 
     void release_forward_context(const ForwardContext& forward_ctx);
 

@@ -2062,6 +2062,8 @@ class BackgroundMode(enum.Enum):
 
     RANDOM = 3
 
+    CUBEMAP = 4
+
 class OptimizationParams:
     def __init__(self) -> None: ...
 

@@ -3513,6 +3513,38 @@ namespace lfs::training {
                 LOG_INFO("{}", pose_refinement_->description());
             }
 
+            // --bg-mode cubemap (LFC): learned background cubemap, initialised to --bg-color
+            bg_cubemap_.reset();
+            bg_cubemap_saved_ = false;
+            if (params.optimization.bg_mode == lfs::core::param::BackgroundMode::Cubemap) {
+                if (params.optimization.gut)
+                    return std::unexpected("--bg-mode cubemap needs the standard rasterizer (not --gut)");
+                BackgroundCubemapSettings cube_settings;
+                cube_settings.res = params.optimization.bg_cubemap_res;
+                cube_settings.init = params.optimization.bg_color;
+                cube_settings.lr = params.optimization.bg_cubemap_lr;
+                cube_settings.lr_final_factor = params.optimization.bg_cubemap_lr_final;
+                cube_settings.smooth = params.optimization.bg_cubemap_smooth;
+                cube_settings.init_path = params.optimization.bg_cubemap_init;
+                std::string cube_error;
+                bg_cubemap_ = BackgroundCubemap::create(cube_settings, cube_error);
+                if (!bg_cubemap_)
+                    return std::unexpected(cube_error);
+                LOG_INFO("{}", bg_cubemap_->description());
+                // LFQPLC: which lens / pose the background rays use (the same as the splats' projection)
+                const auto* cube_table = active_radial_lens();
+                LOG_INFO("Background cubemap rays (LFQPLC): lens {}; rolling-shutter row poses {}; camera pose {}; composited "
+                         "by the rasterizer before the appearance model ({}), as the solid clear colour is",
+                         cube_table != nullptr ? std::format("= the radial lens table {} (--lens-radial)", cube_table->path.string())
+                                               : std::string("= each camera's own (k-polynomial / pinhole)"),
+                         rolling_shutter_ ? "on (each pixel's own row)" : "off",
+                         pose_refinement_ ? std::format("= the refined pose from iteration {} on (--pose-opt; the pose gradient "
+                                                        "comes from the splats only, the background is held for it)",
+                                                        pose_refinement_->settings().start)
+                                          : std::string("= the dataset's"),
+                         params.optimization.use_ppisp ? "PPISP" : (params.optimization.use_exposure_correction ? "exposure correction" : "none"));
+            }
+
             // Initialize background color tensor from params
             {
                 const auto& bg_color = params.optimization.bg_color;
@@ -6806,6 +6838,64 @@ namespace lfs::training {
                     LOG_VRAM_DIFF("train.random_background");
                     bg_image = get_random_background_for_camera(cam->image_width(), cam->image_height(), iter);
                 }
+                // --bg-mode cubemap: this view's background = the learned cubemap through its lens and rolling-shutter rows
+                // (the rasterizer composites it per pixel like an image background; its gradient is taken before the
+                // rasterizer backward and its Adam step runs with the other appearance steps).
+                const bool cubemap_this_step = bg_cubemap_ && !in_popspa && !step_params.gut &&
+                                               step_params.bg_mode == lfs::core::param::BackgroundMode::Cubemap;
+                const cudaStream_t cubemap_stream = !cubemap_this_step                  ? nullptr
+                                                    : lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
+                                                                                        : strategy_->get_model().means().stream();
+                bool cubemap_dump_now = false; // LFQPLC: LFS_CUBEMAP_DUMP names this iteration (also dumps after the appearance model)
+                if (cubemap_this_step) {
+                    LFS_VRAM_SCOPE("train.cubemap_background");
+                    fast_lfs::rasterization::FastGSRollingShutter cube_rs{};
+                    if (rolling_shutter_)
+                        cube_rs = rolling_shutter_->options_for(*cam, iter, cubemap_stream);
+                    // LFQPLC (--pose-opt): the refined transform the rasterizer will draw this camera with (composed on the
+                    // same stream; options_for is called again for the rasterizer, recomposing the same values after this
+                    // render in stream order and zeroing the pose gradient before any backward). Before the pose start it
+                    // returns no transform: the camera's own, as for the splats.
+                    fast_lfs::rasterization::FastGSPose cube_pose{};
+                    if (pose_refinement_)
+                        cube_pose = pose_refinement_->options_for(*cam, iter, cubemap_stream);
+                    bg_image = bg_cubemap_->render(*cam, cube_rs, cubemap_stream, cube_pose.w2c);
+                    // test hook: LFS_CUBEMAP_DUMP=<iteration> writes that step's background (and the faces it sampled) to
+                    // <output>/cubemap_dump/bg_<iteration>.npy with the camera's image name, for checks against abq/cubemap_bg.py
+                    if (const char* dump = std::getenv("LFS_CUBEMAP_DUMP"); dump != nullptr && *dump) {
+                        bool dump_now = false;
+                        for (std::string_view list(dump); !list.empty();) {
+                            const size_t comma = list.find(',');
+                            if (std::atoi(std::string(list.substr(0, comma)).c_str()) == iter)
+                                dump_now = true;
+                            if (comma == std::string_view::npos)
+                                break;
+                            list.remove_prefix(comma + 1);
+                        }
+                        cubemap_dump_now = dump_now;
+                        if (dump_now) {
+                            const auto dump_path = params_.dataset.output_path / "cubemap_dump" / std::format("bg_{}.npy", iter);
+                            std::string dump_error;
+                            if (!bg_cubemap_->dump_last(dump_path, dump_error, cubemap_stream)) {
+                                LOG_ERROR("{}", dump_error);
+                            } else {
+                                std::ofstream info(std::filesystem::path(dump_path).concat(".txt"));
+                                info << cam->image_name() << "\n" << cam->image_width() << " " << cam->image_height() << "\n";
+                                // LFQPLC: the world-to-camera transform the background was drawn with (refined under --pose-opt)
+                                float w2c_used[16] = {};
+                                cudaMemcpyAsync(w2c_used, cube_pose.w2c != nullptr ? cube_pose.w2c : cam->world_view_transform_ptr(),
+                                                sizeof(w2c_used), cudaMemcpyDeviceToHost, cubemap_stream);
+                                cudaStreamSynchronize(cubemap_stream);
+                                info << "w2c" << (cube_pose.w2c != nullptr ? " refined" : " dataset");
+                                for (const float x : w2c_used)
+                                    info << " " << std::format("{:.9g}", x);
+                                info << "\n";
+                                LOG_INFO("cubemap dump: iteration {} camera {} -> {}", iter, cam->image_name(),
+                                         lfs::core::path_to_utf8(dump_path));
+                            }
+                        }
+                    }
+                }
 
                 // Per-camera maps cached from the target must not see a per-iteration background.
                 const lfs::core::Tensor source_gt = gt_image;
@@ -7744,6 +7834,38 @@ namespace lfs::training {
                                 corrected_image.clamp_(0.0f, 1.0f);
                             }
                         }
+                        // LFQPLC test hook (LFS_CUBEMAP_DUMP=<iteration>, --bg-mode cubemap): the order of the background and
+                        // the appearance model. Writes the rasterizer's composite (splats + (1 - alpha) cube), its alpha, the
+                        // image the loss sees (after PPISP / exposure correction / grid) and the PPISP state used for it, so
+                        // a check can confirm corrected = appearance(composite), i.e. the cube goes through PPISP like the 249.
+                        if (cubemap_dump_now) {
+                            const auto ddir = params_.dataset.output_path / "cubemap_dump";
+                            std::string derr;
+                            const cudaStream_t ds = cubemap_stream;
+                            const bool ok = BackgroundCubemap::write_tensor_npy(ddir / std::format("composite_{}.npy", iter),
+                                                                                output.image, derr, ds) &&
+                                            BackgroundCubemap::write_tensor_npy(ddir / std::format("alpha_{}.npy", iter),
+                                                                                output.alpha, derr, ds) &&
+                                            BackgroundCubemap::write_tensor_npy(ddir / std::format("corrected_{}.npy", iter),
+                                                                                corrected_image, derr, ds);
+                            if (!ok)
+                                LOG_ERROR("cubemap dump: {}", derr);
+                            if (ppisp_) {
+                                std::unordered_map<int, std::string> frame_names;
+                                for (const auto& c : train_dataset_->get_cameras())
+                                    if (c)
+                                        frame_names[c->uid()] = c->image_name();
+                                if (auto dumped = ppisp_->write_text_dump(
+                                        ddir / std::format("ppisp_{}.txt", iter), frame_names,
+                                        opt.use_exposure_correction ? "exposure_correction" : "ppisp", iter);
+                                    !dumped)
+                                    LOG_ERROR("cubemap dump: {}", dumped.error());
+                            }
+                            LOG_INFO("cubemap dump: iteration {}: composite, alpha, corrected image (ppisp {}, exposure "
+                                     "correction {}, grid {}) and the PPISP state -> {}",
+                                     iter, ppisp_on ? "on" : "off", exposure_correction ? "on" : "off",
+                                     grid_on ? "on" : "off", lfs::core::path_to_utf8(ddir));
+                        }
                         // For decoupled D-SSIM, the active appearance model provides the corrected image
                         // for the L1/luminance terms, while contrast/structure still use the raw render.
                         const lfs::core::Tensor raw_loss_input =
@@ -8556,6 +8678,12 @@ namespace lfs::training {
                                                                     step_params.gradient_loss_weight,
                                                                     gradient_residual_workspace_);
                         }
+                        // --bg-mode cubemap: raster_grad is now dL/d(composited render) (after the appearance backward and
+                        // every raw-image term), so dL/d(background pixel) = (1 - alpha) raster_grad -> texels.
+                        if (cubemap_this_step && fast_ctx && bg_image.is_valid()) {
+                            LFS_VRAM_SCOPE("train.cubemap_backward");
+                            bg_cubemap_->backward(raster_grad, output.alpha, cubemap_stream);
+                        }
 
                         current_phase = StepPhase::Backward;
                         nvtxRangePush("rasterize_backward");
@@ -8871,6 +8999,37 @@ namespace lfs::training {
                             LOG_INFO("PPISP state at iteration {} written to {} (lock_frames={}, lock_colour={})",
                                      iter, lfs::core::path_to_utf8(dump_path), ppisp_->lock_frames(),
                                      ppisp_->lock_colour());
+                    }
+
+                    // --bg-mode cubemap: smoothness + Adam step of the texels; summary every 1000 iterations; written to
+                    // <output>/bg_cubemap at the last iteration.
+                    if (cubemap_this_step) {
+                        current_phase = StepPhase::OptimizerCommit;
+                        LFS_VRAM_SCOPE("train.cubemap_step");
+                        const bool last = iter >= get_total_iterations();
+                        const bool cube_log = iter == 1 || iter % 1000 == 0 || last;
+                        bg_cubemap_->step(iter, get_total_iterations(), cube_log, cubemap_stream);
+                        if (cube_log)
+                            LOG_INFO("iter {}: {}", iter, bg_cubemap_->summary(cubemap_stream));
+                        if (last && !bg_cubemap_saved_) {
+                            bg_cubemap_saved_ = true;
+                            const auto cube_dir = params_.dataset.output_path / "bg_cubemap";
+                            std::string cube_error;
+                            const std::string note = std::format(
+                                "init {}, lr {:g} -> {:g}, smoothness {:g}, exposure correction {}, rolling shutter {}",
+                                step_params.bg_cubemap_init.empty()
+                                    ? std::format("({:.4f}, {:.4f}, {:.4f})", step_params.bg_color[0], step_params.bg_color[1],
+                                                  step_params.bg_color[2])
+                                    : step_params.bg_cubemap_init,
+                                step_params.bg_cubemap_lr,
+                                step_params.bg_cubemap_lr * step_params.bg_cubemap_lr_final, step_params.bg_cubemap_smooth,
+                                step_params.use_exposure_correction ? "on" : "off", rolling_shutter_ ? "on" : "off");
+                            if (!bg_cubemap_->save(cube_dir, iter, note, cube_error, cubemap_stream))
+                                LOG_ERROR("{}", cube_error);
+                            else
+                                LOG_INFO("Background cubemap at iteration {} written to {}", iter,
+                                         lfs::core::path_to_utf8(cube_dir));
+                        }
                     }
                 }
 

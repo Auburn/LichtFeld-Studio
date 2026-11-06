@@ -108,7 +108,12 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--screen-share-axis", "screen_share_axis", String, false, "; values: max, area"},
             OptimizationCliBinding{"--no-edge-map", "use_edge_map", Bool, true},
             OptimizationCliBinding{"--bg-mode", "bg_mode", Enum, false,
-                                   "; values: solidcolor, modulation, image, random", "solid_color", "solidcolor"},
+                                   "; values: solidcolor, modulation, image, random, cubemap", "solid_color", "solidcolor"},
+            OptimizationCliBinding{"--bg-cubemap-res", "bg_cubemap_res", Integer},
+            OptimizationCliBinding{"--bg-cubemap-lr", "bg_cubemap_lr", Float},
+            OptimizationCliBinding{"--bg-cubemap-lr-final", "bg_cubemap_lr_final", Float},
+            OptimizationCliBinding{"--bg-cubemap-smooth", "bg_cubemap_smooth", Float},
+            OptimizationCliBinding{"--bg-cubemap-init", "bg_cubemap_init", String},
             OptimizationCliBinding{"--random", "random", Bool},
             OptimizationCliBinding{"--init-num-pts", "init_num_pts", Integer},
             OptimizationCliBinding{"--init-extent", "init_extent", Float},
@@ -400,6 +405,8 @@ namespace {
             return BackgroundMode::Image;
         if (mode == "random")
             return BackgroundMode::Random;
+        if (mode == "cubemap")
+            return BackgroundMode::Cubemap;
         return std::nullopt;
     }
 
@@ -904,6 +911,11 @@ namespace {
             ::args::ValueFlag<std::string> bg_mode(training_group, "mode", lfs::core::args::optimization_cli_help("--bg-mode"), {"bg-mode"});
             ::args::ValueFlag<std::string> bg_color(training_group, "color", "solidcolor background color as #RRGGBB or (R,G,B) with 0-255 channels (default: #000000)", {"bg-color"});
             ::args::ValueFlag<std::string> bg_image_path(training_group, "path", "Background image path (required when --bg-mode image)", {"bg-image-path"});
+            ::args::ValueFlag<int> bg_cubemap_res(training_group, "texels", lfs::core::args::optimization_cli_help("--bg-cubemap-res"), {"bg-cubemap-res"});
+            ::args::ValueFlag<float> bg_cubemap_lr(training_group, "lr", lfs::core::args::optimization_cli_help("--bg-cubemap-lr"), {"bg-cubemap-lr"});
+            ::args::ValueFlag<float> bg_cubemap_lr_final(training_group, "factor", lfs::core::args::optimization_cli_help("--bg-cubemap-lr-final"), {"bg-cubemap-lr-final"});
+            ::args::ValueFlag<float> bg_cubemap_smooth(training_group, "weight", lfs::core::args::optimization_cli_help("--bg-cubemap-smooth"), {"bg-cubemap-smooth"});
+            ::args::ValueFlag<std::string> bg_cubemap_init(training_group, "faces.npy", lfs::core::args::optimization_cli_help("--bg-cubemap-init"), {"bg-cubemap-init"});
 
             // =============================================================================
             // INITIALIZATION
@@ -1605,7 +1617,7 @@ namespace {
             if (bg_mode) {
                 parsed_bg_mode = parse_bg_mode(::args::get(bg_mode));
                 if (!parsed_bg_mode) {
-                    return std::unexpected("ERROR: --bg-mode must be one of solidcolor, modulation, image, or random");
+                    return std::unexpected("ERROR: --bg-mode must be one of solidcolor, modulation, image, random, or cubemap");
                 }
             }
 
@@ -1790,6 +1802,11 @@ namespace {
                                         bg_mode_val = parsed_bg_mode,
                                         bg_color_val = parsed_bg_color,
                                         bg_image_path_val = cli_option_present({"--bg-image-path"}) ? std::optional<std::string>(::args::get(bg_image_path)) : std::optional<std::string>(),
+                                        bg_cubemap_res_val = cli_option_present({"--bg-cubemap-res"}) ? std::optional<int>(::args::get(bg_cubemap_res)) : std::optional<int>(),
+                                        bg_cubemap_lr_val = cli_option_present({"--bg-cubemap-lr"}) ? std::optional<float>(::args::get(bg_cubemap_lr)) : std::optional<float>(),
+                                        bg_cubemap_lr_final_val = cli_option_present({"--bg-cubemap-lr-final"}) ? std::optional<float>(::args::get(bg_cubemap_lr_final)) : std::optional<float>(),
+                                        bg_cubemap_smooth_val = cli_option_present({"--bg-cubemap-smooth"}) ? std::optional<float>(::args::get(bg_cubemap_smooth)) : std::optional<float>(),
+                                        bg_cubemap_init_val = cli_option_present({"--bg-cubemap-init"}) ? std::optional<std::string>(::args::get(bg_cubemap_init)) : std::optional<std::string>(),
                                         random_flag = bool(random),
                                         gut_flag = bool(gut),
                                         undistort_flag = bool(undistort),
@@ -2038,6 +2055,14 @@ namespace {
                 if (bg_image_path_val) {
                     opt.bg_image_path = lfs::core::utf8_to_path(*bg_image_path_val);
                 }
+                setVal(bg_cubemap_res_val, opt.bg_cubemap_res);
+                setVal(bg_cubemap_lr_val, opt.bg_cubemap_lr);
+                setVal(bg_cubemap_lr_final_val, opt.bg_cubemap_lr_final);
+                setVal(bg_cubemap_smooth_val, opt.bg_cubemap_smooth);
+                if (bg_cubemap_init_val)
+                    opt.bg_cubemap_init = bg_cubemap_init_val->empty()
+                                              ? std::string{}
+                                              : lfs::core::path_to_utf8(absolute_input_path(*bg_cubemap_init_val));
                 setFlag(random_flag, opt.random);
                 setFlag(gut_flag, opt.gut);
                 setFlag(undistort_flag, opt.undistort);
@@ -2193,6 +2218,11 @@ namespace {
                 note_opt("bg_modulation", bg_mode_val.has_value());
                 note_opt("bg_color", bg_color_val.has_value());
                 note_opt("bg_image_path", bg_image_path_val.has_value());
+                note_opt("bg_cubemap_res", bg_cubemap_res_val.has_value());
+                note_opt("bg_cubemap_lr", bg_cubemap_lr_val.has_value());
+                note_opt("bg_cubemap_lr_final", bg_cubemap_lr_final_val.has_value());
+                note_opt("bg_cubemap_smooth", bg_cubemap_smooth_val.has_value());
+                note_opt("bg_cubemap_init", bg_cubemap_init_val.has_value());
                 note_opt("random", random_flag);
                 note_opt("gut", gut_flag);
                 note_opt("undistort", undistort_flag);

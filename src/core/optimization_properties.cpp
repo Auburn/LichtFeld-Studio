@@ -1303,10 +1303,38 @@ namespace lfs::core::param {
                        {{"SolidColor", BackgroundMode::SolidColor, "training.options.bg.color", "solid_color"},
                         {"Modulation", BackgroundMode::Modulation, "training.options.bg.modulation", "modulation"},
                         {"Image", BackgroundMode::Image, "training.options.bg.image", "image"},
-                        {"Random", BackgroundMode::Random, "training.options.bg.random", "random"}},
+                        {"Random", BackgroundMode::Random, "training.options.bg.random", "random"},
+                        {"Cubemap", BackgroundMode::Cubemap, "training.options.bg.cubemap", "cubemap"}},
                        "Background mode")
             .locale("training_params.bg_mode")
             .tooltip("training.tooltip.bg_modulation")
+            .all_strategies()
+            .int_prop(&OptimizationParameters::bg_cubemap_res,
+                      "bg_cubemap_res", "Background Cubemap Resolution", d.bg_cubemap_res, 4, 4096,
+                      "--bg-mode cubemap: texels per cube face edge (6 faces x res x res RGB)")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::bg_cubemap_lr,
+                        "bg_cubemap_lr", "Background Cubemap LR", d.bg_cubemap_lr, 0.0f, 1.0f,
+                        "--bg-mode cubemap: Adam learning rate of the cubemap texels at iteration 0")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::bg_cubemap_lr_final,
+                        "bg_cubemap_lr_final", "Background Cubemap Final LR Factor", d.bg_cubemap_lr_final, 0.0f, 1.0f,
+                        "--bg-mode cubemap: the learning rate decays exponentially to lr * this factor at the last iteration")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::bg_cubemap_smooth,
+                        "bg_cubemap_smooth", "Background Cubemap Smoothness", d.bg_cubemap_smooth, 0.0f, 10000.0f,
+                        "--bg-mode cubemap: weight of the mean squared difference of neighbouring texels (keeps the "
+                        "cubemap sky-like and low-frequency; 0 = off)")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .string_prop(&OptimizationParameters::bg_cubemap_init,
+                         "bg_cubemap_init", "Background Cubemap Init", d.bg_cubemap_init,
+                         "--bg-mode cubemap: start the cubemap from this faces.npy (float32 [6, R, R, 3], faces +X -X +Y -Y "
+                         "+Z -Z as the export writes them, resampled if R differs) instead of the clear colour")
+            .flags(PROP_ADVANCED)
             .all_strategies()
             .build();
     }

@@ -19,6 +19,9 @@
 //     the table camera's full and quarter resolution; --vs-poly: also against the k-polynomial of the table's camera
 //     (for a table made from an 8-value lens's own curve: the table machinery reproduces the polynomial); then the
 //     analytic gradients through the full forward/backward with the table against central differences (gradcheck).
+//   LichtFeld-Studio lfe-fisheye cuberaycheck <lens_radial.txt>   (LFQPLC, --bg-mode cubemap with --lens-radial)
+//     The background cubemap's pixel rays (the render kernel's own) projected back through the rasterizer's projection
+//     land on their pixel centres, through the table (and miss through the tag polynomial: negative control).
 //   LFS_LENS_RADIAL=<lens_radial.txt> LichtFeld-Studio lfe-fisheye render ...: render through the table (the cameras
 //     must be the table's camera, as in training with --lens-radial).
 //   LichtFeld-Studio lfe-distortion gradcheck
@@ -34,6 +37,7 @@
 #include "io/loader.hpp"
 #include "training/rasterization/fast_rasterizer.hpp"
 #include "training/rasterization/radial_lens_table.hpp"
+#include "training/kernels/bg_cubemap.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1323,6 +1327,123 @@ namespace lfs::app {
                              bad, forward_bad, left_out_mismatch);
             return bad == 0 && forward_bad == 0 && left_out_mismatch == 0 ? 0 : 1;
         }
+        // ---------------------------------------------------------------- cubemap rays vs the splats' projection (LFQPLC)
+        // The background cubemap's pixel rays (kernels::cubemap_pixel_dirs: exactly the render / backward kernels' ray, here
+        // with an identity pose and no rolling shutter) projected back through the rasterizer's own projection
+        // (fisheye_projection_selftest: FastGS's fisheye::terms_lens + project, the forward preprocess path) must land on
+        // the pixel centres. Cases: the table's rays through the table (the --lens-radial path); the table's rays through
+        // the tag k-polynomial (negative control: must miss); the polynomial's rays through the polynomial (the original path).
+        int run_cuberaycheck(const std::filesystem::path& file) {
+            try {
+                lfs::training::activate_radial_lens(lfs::training::load_radial_lens_table(file));
+            } catch (const std::exception& e) {
+                std::println(stderr, "{}", e.what());
+                return 1;
+            }
+            const auto& t = *lfs::training::active_radial_lens();
+            std::println("radial lens table: {}", t.describe());
+            const int W = t.width / 4, H = t.height / 4;
+            const float fx = static_cast<float>(t.fx / 4), fy = static_cast<float>(t.fy / 4), cx = static_cast<float>(t.cx / 4),
+                        cy = static_cast<float>(t.cy / 4);
+            const double tmax = 88.0 * std::numbers::pi / 180.0;
+            float* d_w2c = nullptr;
+            float* d_dirs = nullptr;
+            const float ident[16] = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            cudaMalloc(&d_w2c, sizeof(ident));
+            cudaMemcpy(d_w2c, ident, sizeof(ident), cudaMemcpyHostToDevice);
+            cudaMalloc(&d_dirs, sizeof(float) * 3 * W * H);
+            const double valid_deg = t.valid * 180.0 / std::numbers::pi;
+            int bad = 0;
+            struct Case {
+                const char* name;
+                bool ray_table, proj_table, expect_hit;
+            };
+            for (const Case c : {Case{"cube rays through the table -> splat projection through the table (--lens-radial)", true, true, true},
+                                 Case{"cube rays through the table -> projection through the tag k-polynomial (negative control)", true, false, false},
+                                 Case{"cube rays through the k-polynomial -> projection through the k-polynomial (original path)", false, false, true}}) {
+                lfs::training::kernels::CubemapView v{};
+                v.width = W;
+                v.height = H;
+                v.fx = fx;
+                v.fy = fy;
+                v.cx = cx;
+                v.cy = cy;
+                v.fisheye = 1;
+                v.k1 = static_cast<float>(t.k[0]);
+                v.k2 = static_cast<float>(t.k[1]);
+                v.k3 = static_cast<float>(t.k[2]);
+                v.k4 = static_cast<float>(t.k[3]);
+                v.theta_max = static_cast<float>(tmax);
+                if (c.ray_table)
+                    v.radial = t.device_view();
+                v.w2c = d_w2c;
+                lfs::training::kernels::cubemap_pixel_dirs(v, d_dirs, nullptr);
+                std::vector<float> dirs(3ull * W * H);
+                cudaMemcpy(dirs.data(), d_dirs, sizeof(float) * dirs.size(), cudaMemcpyDeviceToHost);
+                fr::FastGSLens lens;
+                lens.model = fr::kLensFisheye;
+                lens.k1 = v.k1;
+                lens.k2 = v.k2;
+                lens.k3 = v.k3;
+                lens.k4 = v.k4;
+                lens.max_w = static_cast<float>(std::tan(tmax) * std::tan(tmax));
+                if (c.proj_table)
+                    lens.radial = t.device_view();
+                const int n = W * H;
+                std::vector<float> in(9ull * n, 0.0f), out(17ull * n);
+                for (int i = 0; i < n; ++i)
+                    for (int k = 0; k < 3; ++k)
+                        in[9ull * i + k] = 3.0f * dirs[3ull * i + k]; // a point 3 units along the ray
+                fr::fisheye_projection_selftest(lens, fx, fy, cx, cy, in.data(), n, out.data());
+                // error per angle band (the ray's own angle off the axis)
+                const double bands[] = {0, 1, 10, 30, 50, 65, 72, valid_deg, 90};
+                const int nb = static_cast<int>(std::size(bands)) - 1;
+                std::vector<double> bmax(nb, 0.0), bsum(nb, 0.0);
+                std::vector<long> bn(nb, 0);
+                std::vector<double> errs_valid;
+                double emax_valid = 0, emax_all = 0;
+                for (int y = 0; y < H; ++y)
+                    for (int x = 0; x < W; ++x) {
+                        const size_t i = static_cast<size_t>(y) * W + x;
+                        const float* o = out.data() + 17 * i;
+                        const double e = std::hypot(o[0] - (x + 0.5), o[1] - (y + 0.5));
+                        const double th = std::acos(std::clamp(static_cast<double>(dirs[3 * i + 2]), -1.0, 1.0)) * 180.0 / std::numbers::pi;
+                        int b = 0;
+                        while (b + 1 < nb && th >= bands[b + 1])
+                            ++b;
+                        bmax[b] = std::max(bmax[b], e);
+                        bsum[b] += e;
+                        ++bn[b];
+                        emax_all = std::max(emax_all, e);
+                        if (th <= valid_deg) {
+                            emax_valid = std::max(emax_valid, e);
+                            errs_valid.push_back(e);
+                        }
+                    }
+                std::sort(errs_valid.begin(), errs_valid.end());
+                const auto q = [&](double f) { return errs_valid.empty() ? 0.0 : errs_valid[static_cast<size_t>(f * (errs_valid.size() - 1))]; };
+                std::println("== {} ({}x{} = {} pixels)", c.name, W, H, n);
+                std::println("   inside the table's valid {:.2f} deg: |projected - pixel centre| median {:.3g} px, p99.9 {:.3g}, max {:.3g}; "
+                             "all pixels max {:.3g} px",
+                             valid_deg, q(0.5), q(0.999), emax_valid, emax_all);
+                for (int b = 0; b < nb; ++b)
+                    if (bn[b])
+                        std::println("   theta {:6.2f}-{:6.2f} deg: {:7d} px  mean {:.3g}  max {:.3g} px", bands[b], bands[b + 1], bn[b],
+                                     bsum[b] / bn[b], bmax[b]);
+                const bool hit = emax_all < 5e-3;
+                if (hit != c.expect_hit) {
+                    ++bad;
+                    std::println("   FAILED: expected {}", c.expect_hit ? "every ray to land within 0.005 px" : "a miss (> 0.005 px)");
+                } else {
+                    std::println("   ok ({})", c.expect_hit ? "every pixel's ray lands on its pixel centre within 0.005 px" : "misses, as it must");
+                }
+            }
+            cudaFree(d_w2c);
+            cudaFree(d_dirs);
+            std::println("{}", bad == 0 ? "CUBERAYCHECK OK" : "CUBERAYCHECK FAILED");
+            return bad == 0 ? 0 : 1;
+        }
+
     } // namespace
 
     int run_lfe_fisheye_tool(int argc, const char* const* argv) {
@@ -1334,8 +1455,10 @@ namespace lfs::app {
             return run_gradcheck();
         if (argc >= 4 && std::string(argv[2]) == "radialcheck")
             return run_radialcheck(argv[3], argc >= 5 && std::string(argv[4]) == "--vs-poly");
+        if (argc >= 4 && std::string(argv[2]) == "cuberaycheck")
+            return run_cuberaycheck(argv[3]);
         std::println(stderr, "usage: LichtFeld-Studio lfe-fisheye render <model.ply> <cameras.txt> <out_dir> | projcheck | gradcheck | "
-                             "radialcheck <lens_radial.txt> [--vs-poly]");
+                             "radialcheck <lens_radial.txt> [--vs-poly] | cuberaycheck <lens_radial.txt>");
         return 2;
     }
 

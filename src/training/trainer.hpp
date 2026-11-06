@@ -28,6 +28,7 @@
 #include "progress.hpp"
 #include "pose_refinement.hpp"
 #include "rolling_shutter_motion.hpp"
+#include "bg_cubemap.hpp"
 #include "project_snapshot_chapters.hpp"
 #include "strategies/istrategy.hpp"
 #include "training_cropbox_mask.hpp"
@@ -1081,6 +1082,9 @@ namespace lfs::training {
         // --pose-opt: per-camera pose refinement (pose_refinement.hpp); null = off. Exported once at the last iteration.
         std::unique_ptr<CameraPoseRefinement> pose_refinement_;
         bool pose_refinement_exported_ = false;
+        // --bg-mode cubemap (LFC): the learned background cubemap (bg_cubemap.hpp); null = off
+        std::unique_ptr<BackgroundCubemap> bg_cubemap_;
+        bool bg_cubemap_saved_ = false; // <output>/bg_cubemap written once at the last iteration
         core::Tensor loss_weight_source_;
         core::Tensor loss_weight_map_;
         core::Tensor loss_weight_combined_;

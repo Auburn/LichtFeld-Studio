@@ -6,6 +6,9 @@
 #include "core/cuda_error.hpp"
 #include "core/logger.hpp"
 #include "nanoflann.hpp"
+#include "rasterization/radial_lens_table.hpp"
+#include <format>
+#include <stdexcept>
 
 #include <algorithm>
 #include <bit>
@@ -128,6 +131,13 @@ namespace lfs::training {
             const auto radial = camera.radial_distortion().cpu().contiguous();
             for (size_t i = 0; i < std::min<size_t>(4, radial.numel()); ++i)
                 view.geometry.k[i] = radial.ptr<float>()[i];
+            if (const auto* rl = active_radial_lens(); rl != nullptr) { // --lens-radial (LFRL)
+                if (const auto why = radial_lens_camera_mismatch(*rl, camera); !why.empty())
+                    throw std::runtime_error(std::format("--lens-radial {}: blob seeding view '{}' is not the table's camera: {}",
+                                                         rl->path.string(), camera.image_name(), why));
+                view.geometry.radial_host = rl->host_view();
+                view.geometry.radial_dev = rl->device_view();
+            }
         }
         view.peaks = bs::detect_peaks(rgb, static_cast<int>(_views.size()), _workspace);
         view.geometry.density[0] = view.peaks.density[0];

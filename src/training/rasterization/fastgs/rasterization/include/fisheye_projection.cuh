@@ -15,7 +15,8 @@
 //   d(y h)/d(x, y, z) = (2 x y h_q, h + 2 y^2 h_q, y h_z)
 // h is homogeneous of degree -1, h = H(w) / z with w = q / z^2 = tan^2 theta, and
 //   H(w) = phi(w) P(u),  phi(w) = atan(sqrt w) / sqrt w,  u = theta^2 = w phi^2,
-//   P(u) = 1 + k1 u + k2 u^2 + k3 u^3 + k4 u^4,
+//   P(u) = 1 + k1 u + k2 u^2 + k3 u^3 + k4 u^4 (--lens-radial, LFRL: terms_radial below takes P, dP/du, d2P/du2 from
+//   the radial lens table instead, core/radial_lens.h; C2 in u, so the backward's second derivatives stay continuous),
 // so every partial derivative of h follows from phi, phi', phi'' (a series near the axis, where the
 // closed forms cancel, and the closed forms elsewhere):
 //   h = H / z,  h_q = H' / z^3,  h_z = -(H + 2 w H') / z^2,
@@ -87,6 +88,49 @@ namespace fast_lfs::rasterization::kernels::fisheye {
             t.hqq = t.hqz = t.hzz = 0.0f;
         }
         return t;
+    }
+
+    // --lens-radial (LFRL): terms<> with the radial lens table's P(u), dP/du, d2P/du2 instead of the k-polynomial. Used only
+    // by the RADIAL = true kernel instantiations (terms_lens), so terms<> above and every kernel without the option are
+    // compiled exactly as before.
+    template <bool SECOND>
+    __device__ __forceinline__ Terms terms_radial(const FastGSLens& lens, const float q, const float z) {
+        const float iz = 1.0f / z;
+        const float iz2 = iz * iz;
+        const float w = q * iz2;
+        float phi, p1, p2;
+        phi_terms(w, phi, p1, p2);
+        const float u = w * phi * phi;                    // theta^2
+        const float u1 = phi * phi + 2.0f * w * phi * p1; // du/dw
+        float P, P1, P2;
+        lfs::core::radial_lens_P(lens.radial, u, P, P1, P2);
+        const float H = phi * P;
+        const float H1 = p1 * P + phi * P1 * u1;
+        Terms t;
+        t.h = H * iz;
+        t.hq = H1 * iz2 * iz;
+        t.hz = -(H + 2.0f * w * H1) * iz2;
+        if constexpr (SECOND) {
+            const float u2 = 4.0f * phi * p1 + 2.0f * w * p1 * p1 + 2.0f * w * phi * p2;
+            const float H2 = p2 * P + 2.0f * p1 * P1 * u1 + phi * (P2 * u1 * u1 + P1 * u2);
+            const float iz3 = iz2 * iz;
+            const float iz4 = iz2 * iz2;
+            t.hqq = H2 * iz4 * iz;
+            t.hqz = -(2.0f * w * H2 + 3.0f * H1) * iz4;
+            t.hzz = (2.0f * H + 10.0f * w * H1 + 4.0f * w * w * H2) * iz3;
+        } else {
+            t.hqq = t.hqz = t.hzz = 0.0f;
+        }
+        return t;
+    }
+
+    // The lens of a kernel instantiation: the radial lens table (RADIAL) or the k-polynomial.
+    template <bool SECOND, bool RADIAL>
+    __device__ __forceinline__ Terms terms_lens(const FastGSLens& lens, const float q, const float z) {
+        if constexpr (RADIAL)
+            return terms_radial<SECOND>(lens, q, z);
+        else
+            return terms<SECOND>(lens, q, z);
     }
 
     // The projected centre (pixels) and the rows of the Jacobian d(u, v)/d(x, y, z) at camera-space p.

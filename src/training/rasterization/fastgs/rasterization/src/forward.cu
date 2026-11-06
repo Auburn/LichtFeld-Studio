@@ -210,6 +210,8 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
         throw std::runtime_error("FastGS depth distortion: the per-splat depths and grad_depths buffers must be bound with the moments");
     if (rs.motion != nullptr && (rs.readout == nullptr || lens.model != kLensFisheye))
         throw std::runtime_error("FastGS rolling shutter: needs the readout buffer and the native fisheye lens");
+    if (lens.radial.seg != nullptr && lens.model != kLensFisheye)
+        throw std::runtime_error("FastGS --lens-radial: the radial lens table needs the native fisheye lens");
 
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const uint64_t n_tiles_u64 = static_cast<uint64_t>(grid.x) * static_cast<uint64_t>(grid.y);
@@ -255,9 +257,13 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
                                  const uint n_work_items,
                                  float* screen_share,
                                  const FastGSDistortion& preprocess_distortion) {
+        // --lens-radial (LFRL): the radial lens table is its own instantiation (RADIAL = true); the others are unchanged
         auto* const preprocess_kernel = lens.model == kLensFisheye
-                                            ? (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true>
-                                                                    : kernels::forward::preprocess_cu<true, false>)
+                                            ? (lens.radial.seg != nullptr
+                                                   ? (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true, true>
+                                                                           : kernels::forward::preprocess_cu<true, false, true>)
+                                                   : (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true>
+                                                                           : kernels::forward::preprocess_cu<true, false>))
                                             : kernels::forward::preprocess_cu<false, false>;
         preprocess_kernel<<<div_round_up(n_work_items, static_cast<uint>(config::block_size_preprocess)), config::block_size_preprocess, 0, stream>>>(
             means,

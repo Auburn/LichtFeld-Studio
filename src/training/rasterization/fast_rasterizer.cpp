@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "fast_rasterizer.hpp"
+#include "radial_lens_table.hpp"
+#include <format>
 #include "core/crash_handler.hpp"
 #include "core/logger.hpp"
 #include "core/native_fs.hpp"
@@ -120,6 +122,15 @@ namespace lfs::training {
         lens.k2 = k[1];
         lens.k3 = k[2];
         lens.k4 = k[3];
+        // --lens-radial (LFRL): the radial lens table replaces the polynomial, for the table's own camera only (the
+        // trainer checks every camera at start; anything else reaching here is an error, never a silent polynomial)
+        const RadialLensTable* const radial_table = active_radial_lens();
+        if (radial_table != nullptr) {
+            if (const auto why = radial_lens_camera_mismatch(*radial_table, camera); !why.empty())
+                throw std::runtime_error(std::format("--lens-radial {}: camera '{}' is not the table's camera: {}",
+                                                     radial_table->path.string(), camera.image_name(), why));
+            lens.radial = radial_table->device_view();
+        }
 
         // Splat centres up to theta_max off the axis are drawn (default 88 degrees: the game draws
         // everything in front of the camera; z > 0 is the hard limit of the projection). The lens
@@ -130,9 +141,12 @@ namespace lfs::training {
             if (deg > 1.0 && deg < 89.9)
                 theta_max = deg * std::numbers::pi / 180.0;
         }
+        const core::RadialLensView radial_host = radial_table != nullptr ? radial_table->host_view() : core::RadialLensView{};
         for (double t = 0.0; t <= theta_max; t += 5e-4) {
             const double t2 = t * t;
-            const double slope = 1.0 + t2 * (3.0 * k[0] + t2 * (5.0 * k[1] + t2 * (7.0 * k[2] + t2 * 9.0 * k[3])));
+            const double slope = radial_table != nullptr
+                                     ? static_cast<double>(core::radial_lens_slope(radial_host, static_cast<float>(t)))
+                                     : 1.0 + t2 * (3.0 * k[0] + t2 * (5.0 * k[1] + t2 * (7.0 * k[2] + t2 * 9.0 * k[3])));
             if (slope <= 0.0) {
                 theta_max = 0.98 * t;
                 break;
@@ -415,6 +429,12 @@ namespace lfs::training {
         const FastGSDistortionOptions& distortion_options,
         int screen_share_axis,
         const fast_lfs::rasterization::FastGSRollingShutter& rolling_shutter) {
+        // --lens-radial (LFRL): refuse a camera that is not the table's camera here, before the crash-dump block below
+        // (the trainer checks every camera at start, so this only catches other callers)
+        if (const RadialLensTable* const rl = active_radial_lens(); rl != nullptr && viewpoint_camera.camera_model_type() == core::CameraModelType::FISHEYE)
+            if (const auto why = radial_lens_camera_mismatch(*rl, viewpoint_camera); !why.empty())
+                throw std::runtime_error(std::format("--lens-radial {}: camera '{}' is not the table's camera: {}",
+                                                     rl->path.string(), viewpoint_camera.image_name(), why));
         // Get camera parameters
         const int full_width = viewpoint_camera.image_width();
         const int full_height = viewpoint_camera.image_height();

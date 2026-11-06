@@ -4,6 +4,7 @@
 #pragma once
 
 #include "core/export.hpp"
+#include "core/radial_lens.h"
 #include "core/tensor.hpp"
 
 #include <array>
@@ -49,7 +50,23 @@ namespace lfs::training::kernels::blob_seeding {
         // OPENCV_FISHEYE lens of a natively trained fisheye camera (--native-fisheye); 0 = pinhole
         int fisheye = 0;
         float k[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        // --lens-radial (LFRL): the radial lens table (host and device copies; seg == nullptr: the k-polynomial)
+        lfs::core::RadialLensView radial_host{};
+        lfs::core::RadialLensView radial_dev{};
     };
+
+    // theta_d of a fisheye view's lens: the k-polynomial, or the radial lens table (--lens-radial)
+    LFS_BLOB_HD inline float sweep_thetad(const SweepView& v, const float th) {
+#ifdef __CUDA_ARCH__
+        const lfs::core::RadialLensView& rl = v.radial_dev;
+#else
+        const lfs::core::RadialLensView& rl = v.radial_host;
+#endif
+        if (rl.seg != nullptr)
+            return lfs::core::radial_lens_thetad(rl, th);
+        const float t2 = th * th;
+        return th * (1.0f + t2 * (v.k[0] + t2 * (v.k[1] + t2 * (v.k[2] + t2 * v.k[3]))));
+    }
 
     // A view's pixel ray as (dx, dy, 1) in camera space from (m_x, m_y) = ((u - cx) / fx, (v - cy) / fy);
     // false where a fisheye ray is not in front of the camera (theta past ~89 degrees).
@@ -69,8 +86,7 @@ namespace lfs::training::kernels::blob_seeding {
         float lo = 0.0f, hi = 1.56f;
         for (int i = 0; i < 40; ++i) {
             const float th = 0.5f * (lo + hi);
-            const float t2 = th * th;
-            const float d = th * (1.0f + t2 * (v.k[0] + t2 * (v.k[1] + t2 * (v.k[2] + t2 * v.k[3]))));
+            const float d = sweep_thetad(v, th);
             (d < td ? lo : hi) = th;
         }
         const float th = 0.5f * (lo + hi);
@@ -91,8 +107,7 @@ namespace lfs::training::kernels::blob_seeding {
         }
         const float rho = sqrtf(X * X + Y * Y);
         const float th = atan2f(rho, Z);
-        const float t2 = th * th;
-        const float td = th * (1.0f + t2 * (v.k[0] + t2 * (v.k[1] + t2 * (v.k[2] + t2 * v.k[3]))));
+        const float td = sweep_thetad(v, th);
         const float s = rho > 1e-7f * Z ? td / rho : 1.0f / Z;
         u = v.fx * s * X + v.cx;
         w = v.fy * s * Y + v.cy;

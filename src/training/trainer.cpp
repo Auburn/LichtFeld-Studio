@@ -58,6 +58,7 @@
 #include "optimizer/adam_optimizer.hpp"
 #include "python/runner.hpp"
 #include "rasterization/fast_rasterizer.hpp"
+#include "rasterization/radial_lens_table.hpp"
 #include "rasterization/gsplat/GeometryFeatures.h"
 #include "rasterization/gsplat/Ops.h"
 #include "rasterization/gsplat_rasterizer.hpp"
@@ -2720,6 +2721,11 @@ namespace lfs::training {
     // cloud once, so the supervision target is absolute and multi-view
     // consistent instead of chasing the current render.
     void Trainer::fitDepthAnchors(const size_t cameras_with_depth) {
+        // --lens-radial (LFRL) replaces the fisheye polynomial in the rasterizer and blob seeding only; the depth-anchor
+        // projection (depth_anchor_cache.cpp depth_camera_projection) still uses the cameras' k's: refuse to mix two lenses
+        if (active_radial_lens() != nullptr)
+            throw std::runtime_error("--lens-radial does not cover the depth-anchor projection of the depth loss (it would use "
+                                     "the cameras' k-polynomial): train without depth maps / the depth loss");
         nvtxRangePush("fit_depth_anchors");
         const auto fit_start = std::chrono::steady_clock::now();
         const auto phase_ms = [](std::chrono::steady_clock::time_point start) {
@@ -3382,6 +3388,41 @@ namespace lfs::training {
                 LOG_INFO("Native fisheye: {} training cameras are projected through their fisheye lens by the "
                          "standard rasterizer (images and masks stay in fisheye space)",
                          native);
+            }
+
+            // --lens-radial (LFRL): the radial lens table replaces the k-polynomial of every native-fisheye camera, which
+            // must all be the table's camera (training and evaluation sets), checked here so nothing fails mid-run
+            activate_radial_lens(nullptr);
+            if (!params.optimization.lens_radial.empty()) {
+                if (!params.optimization.native_fisheye || params.optimization.gut || params.optimization.undistort)
+                    return std::unexpected("--lens-radial needs --native-fisheye (the standard rasterizer), not --gut or --undistort");
+                std::shared_ptr<RadialLensTable> table;
+                try {
+                    table = load_radial_lens_table(params.optimization.lens_radial);
+                    activate_radial_lens(table);
+                } catch (const std::exception& e) {
+                    return std::unexpected(std::string(e.what()));
+                }
+                int n_train = 0, n_val = 0, total = 0;
+                for (const auto* dataset : {train_dataset_.get(), val_dataset_.get()}) {
+                    if (dataset == nullptr)
+                        continue;
+                    for (auto& cam : dataset->get_cameras()) {
+                        if (!cam)
+                            continue;
+                        if (dataset == train_dataset_.get())
+                            ++total;
+                        if (const auto why = radial_lens_camera_mismatch(*table, *cam); !why.empty()) {
+                            activate_radial_lens(nullptr);
+                            return std::unexpected(std::format("--lens-radial {}: camera '{}' is not the table's camera: {}",
+                                                               table->path.string(), cam->image_name(), why));
+                        }
+                        ++(dataset == train_dataset_.get() ? n_train : n_val);
+                    }
+                }
+                LOG_INFO("Radial lens (--lens-radial): {} of {} training cameras ({} evaluation cameras) are projected through "
+                         "the radial lens table {}",
+                         n_train, total, n_val, table->describe());
             }
 
             // Dynamic rolling shutter (--rolling-shutter; native fisheye standard rasterizer only)

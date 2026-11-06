@@ -282,6 +282,11 @@ namespace lfs::core::param {
                          "Folder of per-pixel photometric loss weight maps, <image name>.png per training image (16-bit PNG, weight = value / 10000, or float EXR/TIFF); they multiply the per-pixel L1 + SSIM and the densification error map; a missing map is weight 1; empty turns it off")
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .string_prop(&OptimizationParameters::lens_radial,
+                         "lens_radial", "Radial Lens Table", d.lens_radial,
+                         "Radial lens table (--native-fisheye; abq/lens_radial.py format): a tabulated radial profile theta -> theta_d that replaces the OPENCV_FISHEYE k-polynomial of the table's own camera in the projection, its Jacobian, the rolling-shutter row solve, the culling bound and blob seeding; any other fisheye camera is an error; empty turns it off")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .string_prop(&OptimizationParameters::rolling_shutter,
                          "rolling_shutter", "Rolling Shutter Motion File", d.rolling_shutter,
                          "Dynamic rolling shutter (--native-fisheye): file of per-image motion during the readout (name, angular velocity, angular acceleration, linear velocity, linear acceleration in the mid-readout camera axes); every splat is drawn through the pose of the time its sensor row was read; empty turns it off")

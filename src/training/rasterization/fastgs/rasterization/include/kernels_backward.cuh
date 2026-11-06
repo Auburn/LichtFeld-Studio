@@ -38,8 +38,11 @@ namespace fast_lfs::rasterization::kernels::backward {
 
     // minBlocks=3 budgets registers so shN Adam no longer lives across
     // the geometry backward (sweep 2..4; 3 is the measured default).
+    // LFQPL: POSE (--pose-opt) and RADIAL (--lens-radial, LFRL) are independent. With RADIAL the projection, its Jacobian,
+    // the Jacobian's own derivative and the rolling-shutter row solve come from the radial lens table; the pose gradient
+    // below is built from this kernel's fish_j1 / fish_j2, dL_dmean3d_cam and rs_s, so it goes through the table too.
     template <bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES = false, bool FISHEYE = false, bool RS = false,
-              bool POSE = false>
+              bool POSE = false, bool RADIAL = false>
     __global__ void __launch_bounds__(config::block_size_preprocess_backward, 3) preprocess_backward_cu(
         // These four alias fused_adam.{means,scaling,rotation,opacity}.param (Adam writes).
         const float3* means,
@@ -88,6 +91,7 @@ namespace fast_lfs::rasterization::kernels::backward {
         float* __restrict__ pose_grad) {
         static_assert(!RS || FISHEYE, "the rolling shutter is implemented for the native fisheye path");
         static_assert(!POSE || FISHEYE, "the pose gradient is implemented for the native fisheye path");
+        static_assert(!RADIAL || FISHEYE, "the radial lens table is implemented for the native fisheye path");
         (void)pose_grad;
         (void)cx;
         (void)cy;
@@ -325,7 +329,7 @@ namespace fast_lfs::rasterization::kernels::backward {
             (void)rs_s;
             if constexpr (RS) {
                 rs_motion = rolling_shutter::load_motion(rs);
-                rs_s = rolling_shutter::splat_rows<FISHEYE>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows,
+                rs_s = rolling_shutter::splat_rows<FISHEYE, RADIAL>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows,
                                                            static_cast<uint>(primitive_idx));
             }
             const float4 w2c_r3 = w2c_rows[2];
@@ -391,7 +395,7 @@ namespace fast_lfs::rasterization::kernels::backward {
             fisheye::Terms fish_terms{};
             float3 fish_j1 = make_float3(0.0f), fish_j2 = make_float3(0.0f);
             if constexpr (FISHEYE) {
-                fish_terms = fisheye::terms<true>(lens, cam_p.x * cam_p.x + cam_p.y * cam_p.y, cam_p.z);
+                fish_terms = fisheye::terms_lens<true, RADIAL>(lens, cam_p.x * cam_p.x + cam_p.y * cam_p.y, cam_p.z);
                 float2 unused_mean2d;
                 fisheye::project(fish_terms, cam_p, fx, fy, cx, cy, unused_mean2d, fish_j1, fish_j2);
                 jw_r1 = make_float3(

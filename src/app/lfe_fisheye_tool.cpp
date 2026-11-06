@@ -14,6 +14,13 @@
 //   LichtFeld-Studio lfe-fisheye gradcheck
 //     Analytic gradients (means, scales, rotations, opacities) of a tiny scene through the full
 //     forward/backward against central finite differences of the forward.
+//   LichtFeld-Studio lfe-fisheye radialcheck <lens_radial.txt> [--vs-poly]   (LFRL, --lens-radial)
+//     The radial lens table on the GPU (projection, Jacobian, Jacobian backward) against the same table in double, at
+//     the table camera's full and quarter resolution; --vs-poly: also against the k-polynomial of the table's camera
+//     (for a table made from an 8-value lens's own curve: the table machinery reproduces the polynomial); then the
+//     analytic gradients through the full forward/backward with the table against central differences (gradcheck).
+//   LFS_LENS_RADIAL=<lens_radial.txt> LichtFeld-Studio lfe-fisheye render ...: render through the table (the cameras
+//     must be the table's camera, as in training with --lens-radial).
 //   LichtFeld-Studio lfe-distortion gradcheck
 //     The depth distortion loss alone (pinhole and both fisheye lenses): the forward's loss against a
 //     double-precision reference, and its analytic gradients against central finite differences. Both
@@ -26,6 +33,7 @@
 #include "core/tensor.hpp"
 #include "io/loader.hpp"
 #include "training/rasterization/fast_rasterizer.hpp"
+#include "training/rasterization/radial_lens_table.hpp"
 
 #include <algorithm>
 #include <array>
@@ -65,6 +73,15 @@ namespace lfs::app {
         }
 
         int run_render(const std::filesystem::path& ply, const std::filesystem::path& spec, const std::filesystem::path& out_dir) {
+            if (const char* rl = std::getenv("LFS_LENS_RADIAL"); rl != nullptr && *rl) { // --lens-radial (LFRL)
+                try {
+                    lfs::training::activate_radial_lens(lfs::training::load_radial_lens_table(rl));
+                } catch (const std::exception& e) {
+                    std::println(stderr, "{}", e.what());
+                    return 1;
+                }
+                std::println("radial lens table: {}", lfs::training::active_radial_lens()->describe());
+            }
             auto loader = lfs::io::Loader::create();
             auto load_result = loader->load(ply);
             if (!load_result) {
@@ -106,7 +123,13 @@ namespace lfs::app {
                               radial, Tensor::empty({0}, Device::CPU),
                               fisheye ? CameraModelType::FISHEYE : CameraModelType::PINHOLE,
                               name, {}, {}, w, h, uid++);
-                auto out = lfs::training::fast_rasterize(camera, model, background);
+                lfs::training::RenderOutput out;
+                try {
+                    out = lfs::training::fast_rasterize(camera, model, background);
+                } catch (const std::exception& e) {
+                    std::println(stderr, "render {} failed: {}", name, e.what());
+                    return 1;
+                }
                 auto hwc = out.image.permute({1, 2, 0}).contiguous().cpu();
                 const auto path = out_dir / (name + ".f32");
                 std::ofstream f(path, std::ios::binary);
@@ -119,13 +142,40 @@ namespace lfs::app {
         // ---------------------------------------------------------------- projection check
         struct RefLens {
             double fx, fy, cx, cy, k[4];
+            bool radial = false; // --lens-radial (LFRL): the active radial lens table instead of k (radialcheck)
         };
 
+        // the active radial lens table in double: the same segments (the file's double values) and index rule as core/radial_lens.h
+        void table_P(double u, double& P, double& P1) {
+            const auto& t = *lfs::training::active_radial_lens();
+            const double th = std::sqrt(std::max(u, 0.0));
+            if (th < t.th_end) {
+                const int i = std::clamp(static_cast<int>(th / t.dth), 0, t.n - 2);
+                const double* s = t.segd.data() + 8 * i;
+                const double x = (u - s[0]) * s[1];
+                P = s[2] + x * (s[3] + x * (s[4] + x * (s[5] + x * (s[6] + x * s[7]))));
+                P1 = (s[3] + x * (2.0 * s[4] + x * (3.0 * s[5] + x * (4.0 * s[6] + x * 5.0 * s[7])))) * s[1];
+            } else {
+                P = t.A / th + t.B;
+                P1 = -t.A / (2.0 * th * th * th);
+            }
+        }
+
         double theta_d(const RefLens& L, double t) {
+            if (L.radial) {
+                double P, P1;
+                table_P(t * t, P, P1);
+                return t * P;
+            }
             const double t2 = t * t;
             return t * (1 + t2 * (L.k[0] + t2 * (L.k[1] + t2 * (L.k[2] + t2 * L.k[3]))));
         }
         double theta_d1(const RefLens& L, double t) {
+            if (L.radial) {
+                double P, P1;
+                table_P(t * t, P, P1);
+                return P + 2.0 * t * t * P1;
+            }
             const double t2 = t * t;
             return 1 + t2 * (3 * L.k[0] + t2 * (5 * L.k[1] + t2 * (7 * L.k[2] + t2 * 9 * L.k[3])));
         }
@@ -146,8 +196,9 @@ namespace lfs::app {
             const double rho = std::hypot(x, y);
             const double r2 = rho * rho + z * z;
             if (rho < 1e-7 * std::sqrt(r2)) {
-                // on the axis: theta_d / rho -> 1/z, its rho-derivative vanishes, d/dz = -1/z^2 (times x, y = 0)
-                const double s0 = 1.0 / z;
+                // on the axis: theta_d / rho -> theta_d'(0)/z (1/z for OPENCV_FISHEYE; P(0)/z for a radial lens table),
+                // its rho-derivative vanishes, d/dz = -theta_d'(0)/z^2 (times x, y = 0)
+                const double s0 = theta_d1(L, 0) / z;
                 return {L.fx * s0, 0, L.fx * x * (-theta_d1(L, 0) / r2), 0, L.fy * s0, L.fy * y * (-theta_d1(L, 0) / r2)};
             }
             const double th = std::atan2(rho, z);
@@ -159,26 +210,37 @@ namespace lfs::app {
                     L.fy * s_rho * x * y / rho, L.fy * (s + s_rho * y * y / rho), L.fy * y * s_z};
         }
 
+        struct ProjCase {
+            std::string name;
+            RefLens lens;     // the reference (double)
+            RefLens gpu = {}; // the GPU's lens if gpu_set (radialcheck: the table against the polynomial)
+            bool gpu_set = false;
+        };
+        int projcheck_cases(const std::vector<ProjCase>& cases, const char* ok_word);
+
         int run_projcheck() {
-            struct Case {
-                const char* name;
-                RefLens lens;
-            };
-            const std::vector<Case> cases = {
+            const std::vector<ProjCase> cases = {
                 {"game equidistant (fx 1232.6, k 0)", {1232.6, 1232.6, 1280, 720, {0, 0, 0, 0}}},
                 {"woodland quarter-res (k 0.391 -0.039 0.0024 -0.0027)", {292.43, 296.08, 512, 384, {0.39127139, -0.03901020, 0.00243290, -0.00266145}}},
             };
+            return projcheck_cases(cases, "PROJCHECK");
+        }
+
+        int projcheck_cases(const std::vector<ProjCase>& cases, const char* ok_word) {
             std::mt19937 rng(7);
             std::uniform_real_distribution<double> uni(-1.0, 1.0);
             const std::vector<double> thetas_deg = {0.0, 1e-7, 1e-4, 0.01, 0.5, 5, 15, 17.4, 17.6, 25, 35, 45, 55, 65, 70, 75, 80, 83, 85, 87, 88};
             int failures = 0;
             for (const auto& c : cases) {
                 fr::FastGSLens lens;
+                const RefLens& gl = c.gpu_set ? c.gpu : c.lens;
                 lens.model = fr::kLensFisheye;
-                lens.k1 = static_cast<float>(c.lens.k[0]);
-                lens.k2 = static_cast<float>(c.lens.k[1]);
-                lens.k3 = static_cast<float>(c.lens.k[2]);
-                lens.k4 = static_cast<float>(c.lens.k[3]);
+                lens.k1 = static_cast<float>(gl.k[0]);
+                lens.k2 = static_cast<float>(gl.k[1]);
+                lens.k3 = static_cast<float>(gl.k[2]);
+                lens.k4 = static_cast<float>(gl.k[3]);
+                if (gl.radial)
+                    lens.radial = lfs::training::active_radial_lens()->device_view();
                 std::vector<float> in;
                 std::vector<std::array<double, 3>> pts;
                 std::vector<std::array<double, 6>> gs;
@@ -262,9 +324,9 @@ namespace lfs::app {
                     ++failures;
             }
             if (failures == 0)
-                std::println("PROJCHECK OK");
+                std::println("{} OK", ok_word);
             else
-                std::println("PROJCHECK FAILED ({} problems)", failures);
+                std::println("{} FAILED ({} problems)", ok_word, failures);
             return failures == 0 ? 0 : 1;
         }
 
@@ -387,6 +449,8 @@ namespace lfs::app {
                 s.lens.k4 = static_cast<float>(L.k[3]);
                 const double tmax = std::tan(88.0 * std::numbers::pi / 180.0);
                 s.lens.max_w = static_cast<float>(tmax * tmax);
+                if (L.radial)
+                    s.lens.radial = lfs::training::active_radial_lens()->device_view();
             }
             std::mt19937 rng(seed);
             std::uniform_real_distribution<double> uni(0.0, 1.0);
@@ -648,6 +712,47 @@ namespace lfs::app {
             else
                 std::println("GRADCHECK: {} parameter blocks over 1% relative error (local weights)", bad);
             return bad == 0 ? 0 : 1;
+        }
+
+        // ---------------------------------------------------------------- radial lens table check (LFRL)
+        int run_radialcheck(const std::filesystem::path& file, const bool vs_poly) {
+            try {
+                lfs::training::activate_radial_lens(lfs::training::load_radial_lens_table(file));
+            } catch (const std::exception& e) {
+                std::println(stderr, "{}", e.what());
+                return 1;
+            }
+            const auto& t = *lfs::training::active_radial_lens();
+            std::println("radial lens table: {}", t.describe());
+            const RefLens full = {t.fx, t.fy, t.cx, t.cy, {t.k[0], t.k[1], t.k[2], t.k[3]}, true};
+            const RefLens quarter = {t.fx / 4, t.fy / 4, t.cx / 4, t.cy / 4, {t.k[0], t.k[1], t.k[2], t.k[3]}, true};
+            std::vector<ProjCase> cases = {
+                {std::format("table on the GPU vs the table in double, {}x{}", t.width, t.height), full},
+                {std::format("table on the GPU vs the table in double, {}x{}", t.width / 4, t.height / 4), quarter},
+            };
+            int bad = projcheck_cases(cases, "RADIAL PROJCHECK (table vs table)");
+            if (vs_poly) {
+                RefLens poly = full, polyq = quarter;
+                poly.radial = polyq.radial = false;
+                const std::vector<ProjCase> pc = {
+                    {std::format("table on the GPU vs the k-polynomial in double, {}x{}", t.width, t.height), poly, full, true},
+                    {std::format("table on the GPU vs the k-polynomial in double, {}x{}", t.width / 4, t.height / 4), polyq, quarter, true},
+                };
+                bad += projcheck_cases(pc, "RADIAL PROJCHECK (table vs polynomial)");
+            }
+            const std::vector<double> thetas = {0.0, 0.002, 0.2, 5, 17.5, 30, 45, 55, 62, 68, 72, 75, 77};
+            std::println("######## gradients through the full forward/backward with the table (each splat alone, weights inside its 2.5-sigma ellipse)");
+            std::vector<Scene> scenes;
+            for (int i = 0; i < static_cast<int>(thetas.size()); ++i)
+                scenes.push_back(make_scene(true, quarter, t.width / 4, t.height / 4, thetas, 21, true, i));
+            const int gbad = run_gradcheck_case("fisheye: the radial lens table at quarter res", scenes, 0.01);
+            (void)run_gradcheck_case("fisheye: the radial lens table, all splats, smooth weights (noise floor)",
+                                     {make_scene(true, quarter, t.width / 4, t.height / 4, thetas, 21, false)}, 0.1);
+            if (gbad == 0)
+                std::println("RADIAL GRADCHECK OK");
+            else
+                std::println("RADIAL GRADCHECK: {} parameter blocks over 1% relative error", gbad);
+            return bad == 0 && gbad == 0 ? 0 : 1;
         }
 
         // ---------------------------------------------------------------- depth distortion check
@@ -1227,7 +1332,10 @@ namespace lfs::app {
             return run_projcheck();
         if (argc >= 3 && std::string(argv[2]) == "gradcheck")
             return run_gradcheck();
-        std::println(stderr, "usage: LichtFeld-Studio lfe-fisheye render <model.ply> <cameras.txt> <out_dir> | projcheck | gradcheck");
+        if (argc >= 4 && std::string(argv[2]) == "radialcheck")
+            return run_radialcheck(argv[3], argc >= 5 && std::string(argv[4]) == "--vs-poly");
+        std::println(stderr, "usage: LichtFeld-Studio lfe-fisheye render <model.ply> <cameras.txt> <out_dir> | projcheck | gradcheck | "
+                             "radialcheck <lens_radial.txt> [--vs-poly]");
         return 2;
     }
 

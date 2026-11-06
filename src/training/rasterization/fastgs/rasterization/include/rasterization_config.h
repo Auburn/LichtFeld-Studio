@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "core/radial_lens.h" // --lens-radial (LFRL): the radial lens table view in FastGSLens
+
 #include "helper_math.h"
 
 #define DEF inline constexpr
@@ -34,6 +36,8 @@ namespace fast_lfs::rasterization {
     //     Centres more than theta_max off the axis (rho^2 > max_w z^2, max_w = tan^2 theta_max),
     //     or behind the camera, are culled.
     // Pixel centres sit at integer + 0.5 for both, as in COLMAP.
+    //   radial.seg != nullptr (--lens-radial, LFRL): theta_d = theta P(theta^2) with P from the radial lens table
+    //     (core/radial_lens.h) instead of the k-polynomial; everything else as kLensFisheye. nullptr: the polynomial.
     enum : int { kLensPinhole = 0,
                  kLensFisheye = 1 };
     struct FastGSLens {
@@ -43,6 +47,7 @@ namespace fast_lfs::rasterization {
         float k3 = 0.0f;
         float k4 = 0.0f;
         float max_w = 0.0f;
+        lfs::core::RadialLensView radial{}; // device table (--lens-radial); seg == nullptr: the k-polynomial
     };
 
     // Depth distortion loss (2DGS / Mip-NeRF 360) folded into the blend kernels. Per pixel

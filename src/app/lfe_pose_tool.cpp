@@ -19,11 +19,17 @@
 //         image / depth weights faded out before each splat's alpha cut-off (the rasterizer drops alpha < 1/255; a
 //         weight there adds a boundary term no analytic gradient carries); then the clustered scene ungated, all three
 //         losses, beside the same finite-difference check of a global splat translation (the rasterizer's own gap).
+//   LichtFeld-Studio lfe-pose gradcheck <lens_radial.txt>   (LFQPL: --pose-opt with --lens-radial)
+//     The same (A), (B), (C) with every scene drawn through the radial lens table (the table's camera at quarter
+//     resolution; the POSE x RADIAL kernel instantiations), so the pose gradient is checked through the table's
+//     projection, Jacobian, Jacobian derivative and rolling-shutter row solve; plus (R): the table really is in use (the
+//     same scene through the table's tag k-polynomial renders differently).
 
 #include "core/camera.hpp"
 #include "core/tensor.hpp"
 #include "training/kernels/pose_refinement_math.hpp"
 #include "training/kernels/pose_refinement_update.hpp"
+#include "training/rasterization/radial_lens_table.hpp"
 
 #include <algorithm>
 #include <array>
@@ -37,6 +43,7 @@
 #include <print>
 #include <random>
 #include <rasterization_api.h>
+#include <stdexcept>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -103,6 +110,10 @@ namespace lfs::app {
             V6 g_pose{}; // dL/d(left perturbation) from the backward
             int n_visible = 0;
         };
+
+        // LFQPL: the radial lens table every scene is drawn through (gradcheck <lens_radial.txt>), or nullptr (the woodland
+        // k-polynomial, as before)
+        const lfs::training::RadialLensTable* g_radial = nullptr;
 
         void composed(const Scene& s, std::array<double, 16>& w2c, std::array<double, 3>& c) {
             pm::compose<double>(s.w2c0.data(), s.c0.data(), s.off.data(), w2c.data(), c.data());
@@ -243,6 +254,20 @@ namespace lfs::app {
             s.lens.k4 = -0.00266145f;
             const double tmax = std::tan(88.0 * std::numbers::pi / 180.0);
             s.lens.max_w = static_cast<float>(tmax * tmax);
+            if (g_radial != nullptr) { // LFQPL: the table's camera at quarter resolution, drawn through the table
+                const auto& t = *g_radial;
+                s.w = t.width / 4;
+                s.h = t.height / 4;
+                s.fx = t.fx / 4;
+                s.fy = t.fy / 4;
+                s.cx = t.cx / 4;
+                s.cy = t.cy / 4;
+                s.lens.k1 = static_cast<float>(t.k[0]); // the tag (unused by the RADIAL kernels)
+                s.lens.k2 = static_cast<float>(t.k[1]);
+                s.lens.k3 = static_cast<float>(t.k[2]);
+                s.lens.k4 = static_cast<float>(t.k[3]);
+                s.lens.radial = t.device_view();
+            }
             std::mt19937 rng(seed);
             std::uniform_real_distribution<double> uni(0.0, 1.0);
             const double a1 = 2 * std::numbers::pi * uni(rng), a2 = std::acos(2 * uni(rng) - 1), a3 = 2 * std::numbers::pi * uni(rng);
@@ -399,6 +424,39 @@ namespace lfs::app {
             int bad = 0;
             const bool verbose = std::getenv("LFE_POSE_VERBOSE") != nullptr;
             const V6 off = {0.010, -0.007, 0.012, 0.012, -0.008, 0.010};
+            if (g_radial != nullptr) {
+                // ---------------------------------------------------------------- (R) LFQPL: the table is what is drawn
+                std::println("lens: the radial lens table {}", g_radial->describe());
+                Scene s = make_scene(11, 3, 4);
+                set_weights(s, 1e-3, 1e-4, nullptr);
+                s.off = off;
+                Scene p = s;
+                p.lens.radial = {}; // the same camera through its tag k-polynomial
+                double worst = 0;
+                for (bool rs : {false, true}) {
+                    Scene a = s, b = p;
+                    if (rs) {
+                        set_rs(a);
+                        set_rs(b);
+                    }
+                    const auto ra = render(a, true, true), rb = render(b, true, true);
+                    double md = 0, mx = 0;
+                    for (size_t i = 0; i < ra.img.size(); ++i) {
+                        md = std::max(md, std::abs(static_cast<double>(ra.img[i]) - rb.img[i]));
+                        mx = std::max(mx, static_cast<double>(std::abs(ra.img[i])));
+                    }
+                    std::println("(R) {}: table vs its tag polynomial, same scene: image max |diff| {:.3e} (of max {:.3f}); "
+                                 "loss {:.9g} vs {:.9g}; |dL/ddr| {:.4e} vs {:.4e}",
+                                 rs ? "rolling shutter" : "global shutter ", md, mx, ra.loss, rb.loss,
+                                 std::hypot(ra.g_pose[0], ra.g_pose[1], ra.g_pose[2]), std::hypot(rb.g_pose[0], rb.g_pose[1], rb.g_pose[2]));
+                    worst = std::max(worst, md);
+                    if (!(md > 1e-4)) // the table must change the render (it is up to ~12 px from the tag lens at 75 deg)
+                        ++bad;
+                }
+                std::println("    the table is {}", worst > 1e-4 ? "in use" : "NOT IN USE (the renders match the polynomial)");
+            } else {
+                std::println("lens: the woodland quarter-res k-polynomial (no radial lens table)");
+            }
             // ---------------------------------------------------------------- (A)
             {
                 Scene s = make_scene(11, 3, 4);
@@ -564,18 +622,29 @@ namespace lfs::app {
             std::println("  worst gated {:.2e} (pass < 1e-2)", worst_fd);
             if (worst_fd > 1e-2)
                 ++bad;
+            const char* const what = g_radial != nullptr ? "POSE GRADCHECK (radial lens table)" : "POSE GRADCHECK";
             if (bad == 0)
-                std::println("POSE GRADCHECK OK");
+                std::println("{} OK", what);
             else
-                std::println("POSE GRADCHECK: {} failed checks", bad);
+                std::println("{}: {} failed checks", what, bad);
             return bad == 0 ? 0 : 1;
         }
     } // namespace
 
     int run_lfe_pose_tool(int argc, const char* const* argv) {
-        if (argc >= 3 && std::string(argv[2]) == "gradcheck")
+        if (argc >= 3 && std::string(argv[2]) == "gradcheck") {
+            if (argc >= 4) { // LFQPL: through a radial lens table (as lfe-fisheye radialcheck loads it)
+                try {
+                    lfs::training::activate_radial_lens(lfs::training::load_radial_lens_table(argv[3]));
+                } catch (const std::exception& e) {
+                    std::println(stderr, "{}", e.what());
+                    return 1;
+                }
+                g_radial = lfs::training::active_radial_lens();
+            }
             return run_gradcheck();
-        std::println(stderr, "usage: LichtFeld-Studio lfe-pose gradcheck");
+        }
+        std::println(stderr, "usage: LichtFeld-Studio lfe-pose gradcheck [<lens_radial.txt>]");
         return 2;
     }
 

@@ -47,6 +47,8 @@ target_link_libraries(fastlfs_backend
 )
 
 target_compile_options(fastlfs_backend PRIVATE
+  # LFRL (6 Nov 2026): nvcc compiles the two real archs (89, 120) in parallel; build speed only, same code
+  $<$<COMPILE_LANGUAGE:CUDA>:--threads=2>
   # CUDA device code + MSVC host compiler flags (Windows only)
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Debug>>:-O0 -g>
   $<$<AND:$<COMPILE_LANGUAGE:CUDA>,$<CXX_COMPILER_ID:MSVC>,$<CONFIG:Release>>:-O3 --use_fast_math --expt-relaxed-constexpr --diag-suppress=20012,186,221 -Xcompiler=/DNDEBUG>

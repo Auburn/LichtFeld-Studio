@@ -75,12 +75,12 @@ namespace fast_lfs::rasterization::kernels::rolling_shutter {
     }
 
     // The sensor row (this render's pixels) where camera-space p is imaged; false if p is not in front.
-    template <bool FISHEYE>
+    template <bool FISHEYE, bool RADIAL = false>
     __device__ __forceinline__ bool row_of(const FastGSLens& lens, const float fy, const float cy, const float3 p, float& v) {
         if (!(p.z > 0.0f))
             return false;
         if constexpr (FISHEYE) {
-            const auto tm = fisheye::terms<false>(lens, p.x * p.x + p.y * p.y, p.z);
+            const auto tm = fisheye::terms_lens<false, RADIAL>(lens, p.x * p.x + p.y * p.y, p.z);
             v = fy * p.y * tm.h + cy;
         } else {
             v = fy * p.y / p.z + cy;
@@ -90,7 +90,7 @@ namespace fast_lfs::rasterization::kernels::rolling_shutter {
 
     // Solves the splat's capture time and replaces rows (in: the mid-readout world-to-camera rows; out: the rows at the
     // splat's time). Returns s, the row fraction (t = s tau, s in [-1/2, 1/2]).
-    template <bool FISHEYE>
+    template <bool FISHEYE, bool RADIAL = false>
     __device__ __forceinline__ float splat_rows(const FastGSRollingShutter& rs, const Motion& m, const FastGSLens& lens,
                                                 const float fy, const float cy, const float render_height,
                                                 const float3 mean, float4 rows[3], const uint primitive_idx) {
@@ -106,7 +106,7 @@ namespace fast_lfs::rasterization::kernels::rolling_shutter {
             float3 p = pm;
             for (int k = 0; k < rs.iters; ++k) {
                 float v;
-                if (!row_of<FISHEYE>(lens, fy, cy, p, v))
+                if (!row_of<FISHEYE, RADIAL>(lens, fy, cy, p, v))
                     break;
                 s = fminf(fmaxf((v + rs.row_offset) / H - 0.5f, -0.5f), 0.5f);
                 if (k + 1 < rs.iters) {

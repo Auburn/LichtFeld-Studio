@@ -106,6 +106,7 @@ set(TRAINING_NEW_SOURCES
     strategies/strategy_factory.cpp
     strategies/improved_gs_plus.cpp
     rasterization/fast_rasterizer.cpp
+    rasterization/radial_lens_table.cpp
     rasterization/gsplat_rasterizer.cpp
     rasterization/pop_scores.cpp
     components/config_serialization.cpp

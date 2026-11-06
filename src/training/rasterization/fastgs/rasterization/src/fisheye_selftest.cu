@@ -14,6 +14,7 @@
 namespace {
     // in: per point p (3), G1 (3), G2 (3); out: per point mean2d (2), J row 1 (3), J row 2 (3),
     // d(G1 . J1 + G2 . J2)/dp through J (3), h, h_q, h_z, h_qq, h_qz, h_zz (6) = 17 floats
+    template <bool RADIAL>
     __global__ void fisheye_selftest_cu(
         const fast_lfs::rasterization::FastGSLens lens,
         const float fx, const float fy, const float cx, const float cy,
@@ -26,7 +27,7 @@ namespace {
         const float3 p = make_float3(a[0], a[1], a[2]);
         const float3 g1 = make_float3(a[3], a[4], a[5]);
         const float3 g2 = make_float3(a[6], a[7], a[8]);
-        const auto t = fe::terms<true>(lens, p.x * p.x + p.y * p.y, p.z);
+        const auto t = fe::terms_lens<true, RADIAL>(lens, p.x * p.x + p.y * p.y, p.z);
         float2 m;
         float3 j1, j2;
         fe::project(t, p, fx, fy, cx, cy, m, j1, j2);
@@ -68,7 +69,10 @@ namespace fast_lfs::rasterization {
         check(cudaMalloc(&d_in, sizeof(float) * 9 * n), "cudaMalloc");
         check(cudaMalloc(&d_out, sizeof(float) * 17 * n), "cudaMalloc");
         check(cudaMemcpy(d_in, host_in, sizeof(float) * 9 * n, cudaMemcpyHostToDevice), "cudaMemcpy");
-        fisheye_selftest_cu<<<(n + 127) / 128, 128>>>(lens, fx, fy, cx, cy, d_in, d_out, n);
+        if (lens.radial.seg != nullptr) // --lens-radial (LFRL)
+            fisheye_selftest_cu<true><<<(n + 127) / 128, 128>>>(lens, fx, fy, cx, cy, d_in, d_out, n);
+        else
+            fisheye_selftest_cu<false><<<(n + 127) / 128, 128>>>(lens, fx, fy, cx, cy, d_in, d_out, n);
         check(cudaGetLastError(), "launch");
         check(cudaMemcpy(host_out, d_out, sizeof(float) * 17 * n, cudaMemcpyDeviceToHost), "cudaMemcpy");
         cudaFree(d_in);

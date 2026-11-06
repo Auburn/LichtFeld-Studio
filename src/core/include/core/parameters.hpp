@@ -323,6 +323,9 @@ namespace lfs::core {
             // rs_lr per camera update, prior rs_prior |c|^2, smoothness rs_smooth |c - c_neighbour|^2) and the readout
             // (Adam, rs_readout_lr ms per step); written to <output>/rs_motion_learned.txt. Empty = off.
             std::string rolling_shutter;
+            // --lens-radial (LFRL): a radial lens table (abq/lens_radial.py format) that replaces the OPENCV_FISHEYE
+            // k-polynomial of every native-fisheye camera (the table's own camera only; others are an error). Empty = off.
+            std::string lens_radial;
             float rs_readout_ms = 10.0f;
             std::string rs_learn;
             float rs_lr = 0.05f;

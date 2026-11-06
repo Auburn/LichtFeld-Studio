@@ -78,6 +78,7 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--generated-loss-weight", "generated_loss_weight", Float},
             OptimizationCliBinding{"--loss-weight-dir", "loss_weight_dir", String},
             OptimizationCliBinding{"--rolling-shutter", "rolling_shutter", String},
+            OptimizationCliBinding{"--lens-radial", "lens_radial", String},
             OptimizationCliBinding{"--rs-readout-ms", "rs_readout_ms", Float},
             OptimizationCliBinding{"--rs-learn", "rs_learn", String, false, "; values: comma list of omega, alpha, vel, acc, readout"},
             OptimizationCliBinding{"--rs-lr", "rs_lr", Float},
@@ -866,6 +867,7 @@ namespace {
             ::args::ValueFlag<float> generated_loss_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--generated-loss-weight"), {"generated-loss-weight"});
             ::args::ValueFlag<std::string> loss_weight_dir(training_group, "folder", lfs::core::args::optimization_cli_help("--loss-weight-dir"), {"loss-weight-dir"});
             ::args::ValueFlag<std::string> rolling_shutter(training_group, "file", lfs::core::args::optimization_cli_help("--rolling-shutter"), {"rolling-shutter"});
+            ::args::ValueFlag<std::string> lens_radial(training_group, "file", lfs::core::args::optimization_cli_help("--lens-radial"), {"lens-radial"});
             ::args::ValueFlag<float> rs_readout_ms(training_group, "ms", lfs::core::args::optimization_cli_help("--rs-readout-ms"), {"rs-readout-ms"});
             ::args::ValueFlag<std::string> rs_learn(training_group, "list", lfs::core::args::optimization_cli_help("--rs-learn"), {"rs-learn"});
             ::args::ValueFlag<float> rs_lr(training_group, "px", lfs::core::args::optimization_cli_help("--rs-lr"), {"rs-lr"});
@@ -1696,6 +1698,7 @@ namespace {
                                         generated_loss_weight_val = cli_option_present({"--generated-loss-weight"}) ? std::optional<float>(::args::get(generated_loss_weight)) : std::optional<float>(),
                                         loss_weight_dir_val = cli_option_present({"--loss-weight-dir"}) ? std::optional<std::string>(::args::get(loss_weight_dir)) : std::optional<std::string>(),
                                         rolling_shutter_val = cli_option_present({"--rolling-shutter"}) ? std::optional<std::string>(::args::get(rolling_shutter)) : std::optional<std::string>(),
+                                        lens_radial_val = cli_option_present({"--lens-radial"}) ? std::optional<std::string>(::args::get(lens_radial)) : std::optional<std::string>(),
                                         rs_readout_ms_val = cli_option_present({"--rs-readout-ms"}) ? std::optional<float>(::args::get(rs_readout_ms)) : std::optional<float>(),
                                         rs_learn_val = cli_option_present({"--rs-learn"}) ? std::optional<std::string>(::args::get(rs_learn)) : std::optional<std::string>(),
                                         rs_lr_val = cli_option_present({"--rs-lr"}) ? std::optional<float>(::args::get(rs_lr)) : std::optional<float>(),
@@ -1914,6 +1917,10 @@ namespace {
                     opt.rolling_shutter = rolling_shutter_val->empty()
                                               ? std::string{}
                                               : lfs::core::path_to_utf8(absolute_input_path(*rolling_shutter_val));
+                if (lens_radial_val)
+                    opt.lens_radial = lens_radial_val->empty()
+                                          ? std::string{}
+                                          : lfs::core::path_to_utf8(absolute_input_path(*lens_radial_val));
                 setVal(rs_readout_ms_val, opt.rs_readout_ms);
                 setVal(rs_learn_val, opt.rs_learn);
                 setVal(rs_lr_val, opt.rs_lr);
@@ -2119,6 +2126,7 @@ namespace {
                 note_opt("generated_loss_weight", generated_loss_weight_val.has_value());
                 note_opt("loss_weight_dir", loss_weight_dir_val.has_value());
                 note_opt("rolling_shutter", rolling_shutter_val.has_value());
+                note_opt("lens_radial", lens_radial_val.has_value());
                 note_opt("rs_readout_ms", rs_readout_ms_val.has_value());
                 note_opt("rs_learn", rs_learn_val.has_value());
                 note_opt("rs_lr", rs_lr_val.has_value());

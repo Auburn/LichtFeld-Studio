@@ -47,7 +47,7 @@ namespace fast_lfs::rasterization::kernels::forward {
         return (static_cast<InstanceKey>(tile_key) << kInstanceDepthBits) | static_cast<InstanceKey>(depth_key);
     }
 
-    template <bool FISHEYE, bool RS = false>
+    template <bool FISHEYE, bool RS = false, bool RADIAL = false>
     __global__ void preprocess_cu(
         const float3* __restrict__ means,
         const float3* __restrict__ raw_scales,
@@ -120,7 +120,7 @@ namespace fast_lfs::rasterization::kernels::forward {
         float4 w2c_rows[3] = {w2c[0], w2c[1], w2c[2]};
         if constexpr (RS) {
             const auto rs_motion = rolling_shutter::load_motion(rs);
-            const float rs_s = rolling_shutter::splat_rows<FISHEYE>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows, primitive_idx);
+            const float rs_s = rolling_shutter::splat_rows<FISHEYE, RADIAL>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows, primitive_idx);
             if (rs.times != nullptr && rs.times_fixed == 0 && active)
                 rs.times[primitive_idx] = rs_s;
         }
@@ -210,7 +210,7 @@ namespace fast_lfs::rasterization::kernels::forward {
         if constexpr (FISHEYE) {
             // analytic Jacobian of the lens at the centre (EWA); inactive lanes get a harmless point
             const float3 p = active ? cam_p : make_float3(0.0f, 0.0f, 1.0f);
-            const auto t = fisheye::terms<false>(lens, p.x * p.x + p.y * p.y, p.z);
+            const auto t = fisheye::terms_lens<false, RADIAL>(lens, p.x * p.x + p.y * p.y, p.z);
             float3 j1, j2;
             fisheye::project(t, p, fx, fy, cx, cy, mean2d, j1, j2);
             jw_r1 = make_float3(

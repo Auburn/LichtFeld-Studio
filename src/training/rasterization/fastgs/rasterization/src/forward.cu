@@ -7,6 +7,7 @@
 #include "forward.h"
 #include "helper_math.h"
 #include "kernels_forward.cuh"
+#include "splat_cutoff.cuh"
 #include "rasterization_config.h"
 #include "utils.h"
 #include "visibility.cuh"
@@ -653,3 +654,25 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
                                                 : 0;
     return result;
 }
+
+// --max-std-dev (LFQPLCY): the process-wide splat cut (this unit's and backward.cu's constant copies)
+namespace fast_lfs::rasterization {
+    void upload_splat_cutoff_backward_unit(const SplatCutoffParams& p); // backward.cu
+    namespace {
+        SplatCutoffParams g_splat_cutoff{};
+    }
+    SplatCutoffParams set_splat_cutoff(const float max_std_dev) {
+        SplatCutoffParams p{};
+        if (max_std_dev > 0.0f) {
+            p.half_z2_max = 0.5f * max_std_dev * max_std_dev;
+            p.min_alpha = kGameMinAlpha;
+            p.min_alpha_rcp = 1.0f / kGameMinAlpha;
+        }
+        if (const cudaError_t e = upload_splat_cutoff_this_unit(p); e != cudaSuccess)
+            throw std::runtime_error(std::string("set_splat_cutoff (forward): ") + cudaGetErrorString(e));
+        upload_splat_cutoff_backward_unit(p);
+        g_splat_cutoff = p;
+        return p;
+    }
+    SplatCutoffParams splat_cutoff() { return g_splat_cutoff; }
+} // namespace fast_lfs::rasterization

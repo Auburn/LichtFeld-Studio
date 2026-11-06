@@ -346,6 +346,32 @@ namespace lfs::core::param {
             .ui_step(1000)
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .bool_prop(&OptimizationParameters::loss_ycc,
+                       "loss_ycc", "YCbCr Loss", d.loss_ycc,
+                       "Photometric loss in BT.709 full-range Y'CbCr of the image the RGB loss sees (after the cubemap composite and PPISP) and of the target: L1 + D-SSIM on luma at full resolution instead of the RGB L1 + D-SSIM, plus an L1 on Cb and Cr after a 2x2 box downsample (half resolution: 4:2:0 video carries no finer colour); masks keep only fully kept 2x2 blocks for the chroma term")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::loss_ycc_chroma_weight,
+                        "loss_ycc_chroma_weight", "YCbCr Chroma Weight", d.loss_ycc_chroma_weight, 0.0f, 100.0f,
+                        "--loss-ycc: weight of the half-resolution chroma L1 (mean of Cb and Cr) relative to the luma L1, inside the L1 share (1 - lambda_dssim)")
+            .precision(4)
+            .ui_step(0.01)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::loss_ycc_luma_scale,
+                        "loss_ycc_luma_scale", "YCbCr Luma L1 Scale", d.loss_ycc_luma_scale, 0.0f, 100.0f,
+                        "--loss-ycc: scale of the luma L1 (the D-SSIM share stays lambda_dssim), to match the RGB L1's magnitude")
+            .precision(4)
+            .ui_step(0.01)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::max_std_dev,
+                        "max_std_dev", "Splat Cutoff (std devs)", d.max_std_dev, 0.0f, 10.0f,
+                        "Cut every splat as the game renderer (fpv-render) does: a pixel takes part only within this many standard deviations (Mahalanobis, in the 0.3-px-dilated 2D covariance) and above alpha 0.5/255, in the forward and the backward; the tile radius shrinks to match; the game draws at sqrt(5) = 2.2360680; 0 = off (the trainer's own extent, alpha >= 1/255)")
+            .precision(7)
+            .ui_step(0.1)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .bool_prop(&OptimizationParameters::pose_opt,
                        "pose_opt", "Camera Pose Refinement", d.pose_opt,
                        "Refine every training camera's pose during training (--native-fisheye standard rasterizer, with or without the rolling shutter; not --gut): a per-camera Adam step of its rotation and camera-centre offset after each of its renders; writes <output>/cameras_refined (COLMAP text, the splat's frame) and pose_refinement.tsv")

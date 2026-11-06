@@ -159,4 +159,19 @@ namespace fast_lfs::rasterization::config {
 
 namespace config = fast_lfs::rasterization::config;
 
+namespace fast_lfs::rasterization {
+    // --max-std-dev (LFQPLCY): the splat cut of the game renderer fpv-render (shaders/draw.wgsl, project.wgsl; gpu/mod.rs:
+    // max_std_dev sqrt(5), min_alpha 0.5/255, dilation 0.3 px^2): a pixel takes part in a splat only when z^2 / 2 <=
+    // half_z2_max, z = its Mahalanobis distance in the splat's dilated 2D covariance (the conic the blend evaluates), and
+    // alpha = opacity exp(-z^2 / 2) >= min_alpha. Tile bounds, the exact tile count and the warp / sub-tile culls use
+    // min(half_z2_max, log(opacity / min_alpha)), so the screen radius shrinks with the cut. The defaults are every
+    // kernel's original test (no geometric cut, alpha >= 1/255). Set process-wide by set_splat_cutoff (rasterization_api.h).
+    struct SplatCutoffParams {
+        float half_z2_max = 3.0e38f;
+        float min_alpha = config::min_alpha_threshold;
+        float min_alpha_rcp = config::min_alpha_threshold_rcp;
+    };
+    inline constexpr float kGameMinAlpha = 0.5f / 255.0f; // fpv-render gpu/mod.rs min_alpha
+} // namespace fast_lfs::rasterization
+
 #undef DEF

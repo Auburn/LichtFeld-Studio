@@ -653,6 +653,7 @@ namespace lfs::training {
             std::optional<RawGradientResidual> raw_residual;
             lfs::core::Tensor grad_alpha;
             lfs::core::Tensor normal_pixel_weight;
+            lfs::core::Tensor photometric_weight; // LFQPLCY: the per-pixel loss weight map the loss used (empty: none)
         };
 
         // Masked photometric loss with optional alpha gradient
@@ -1085,6 +1086,16 @@ namespace lfs::training {
         // --bg-mode cubemap (LFC): the learned background cubemap (bg_cubemap.hpp); null = off
         std::unique_ptr<BackgroundCubemap> bg_cubemap_;
         bool bg_cubemap_saved_ = false; // <output>/bg_cubemap written once at the last iteration
+        // --loss-ycc (LFQPLCY; kernels/ycc_loss.hpp): the luma loss runs the existing L1 + D-SSIM kernels on Y images, the
+        // chroma L1 at half resolution, both gradients mapped back to R'G'B' before the appearance backward
+        bool ycc_loss_ = false;
+        float ycc_scale_ = 1.0f;          // K = (1 - lambda) s + lambda: the luma kernels' loss is scaled by it
+        float ycc_lambda_ = 0.2f;         // lambda / K: the D-SSIM weight passed to the luma kernels
+        float ycc_chroma_scale_ = 0.8f;   // (1 - lambda) x --loss-ycc-chroma-weight
+        lfs::core::Tensor ycc_y_corrected_, ycc_y_raw_, ycc_y_gt_, ycc_grad_rgb_, ycc_grad_y_raw_;
+        lfs::core::Tensor ycc_scalars_;   // device [4]: chroma sums (2), chroma loss, chroma coefficient
+        lfs::core::Tensor ycc_total_;     // device: this step's total photometric loss
+        lfs::core::Tensor ycc_luma_loss_; // device: this step's luma loss (unscaled), kept for the log
         core::Tensor loss_weight_source_;
         core::Tensor loss_weight_map_;
         core::Tensor loss_weight_combined_;

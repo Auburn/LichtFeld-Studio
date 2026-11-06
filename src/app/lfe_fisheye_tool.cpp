@@ -38,6 +38,7 @@
 #include "training/rasterization/fast_rasterizer.hpp"
 #include "training/rasterization/radial_lens_table.hpp"
 #include "training/kernels/bg_cubemap.hpp"
+#include "training/kernels/ycc_loss.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1444,6 +1445,616 @@ namespace lfs::app {
             return bad == 0 ? 0 : 1;
         }
 
+        // ---------------------------------------------------------------- --loss-ycc kernels (LFQPLCY)
+        // The chroma term and the luma conversion of --loss-ycc (kernels/ycc_loss.hpp) on synthetic images:
+        //  (1) a chroma change finer than 2x2 (a checkerboard in Cb only, Y and Cr held) -> zero chroma loss, and no Y change
+        //      beyond float rounding;
+        //  (2) a 2x2-constant Cb step of d -> chroma loss = scale x d / 2 exactly;
+        //  (3) a random render / target / mask (some pixels 0) -> the inputs and every output written to OUT_DIR (float32
+        //      .f32 + ycc_case.txt) for the Python reference (D:/splat_work/lfrqplcy/ycc_ref.py), and the chroma gradient
+        //      against central differences of the chroma loss.
+        struct YccDev {
+            std::vector<float*> ptrs;
+            float* alloc(const std::vector<float>& h) {
+                float* d = nullptr;
+                cudaMalloc(&d, sizeof(float) * std::max<size_t>(h.size(), 1));
+                cudaMemcpy(d, h.data(), sizeof(float) * h.size(), cudaMemcpyHostToDevice);
+                ptrs.push_back(d);
+                return d;
+            }
+            float* zeros(size_t n) { return alloc(std::vector<float>(n, 0.0f)); }
+            static std::vector<float> get(const float* d, size_t n) {
+                std::vector<float> h(n);
+                cudaMemcpy(h.data(), d, sizeof(float) * n, cudaMemcpyDeviceToHost);
+                return h;
+            }
+            ~YccDev() {
+                for (float* p : ptrs)
+                    cudaFree(p);
+            }
+        };
+
+        // chroma loss (and coefficient) of pred vs tgt [3, H, W] with weights w [H, W] (empty: none, border 0)
+        float ycc_chroma(YccDev& dv, const std::vector<float>& pred, const std::vector<float>& tgt, const std::vector<float>& w,
+                         int H, int W, float scale, std::vector<float>* grad, std::vector<float>* sums_out) {
+            namespace yk = lfs::training::kernels;
+            float* dp = dv.alloc(pred);
+            float* dt = dv.alloc(tgt);
+            float* dw = w.empty() ? nullptr : dv.alloc(w);
+            float* ds = dv.zeros(4);
+            yk::ycc_chroma_sums(dp, dt, false, dw, w.empty() ? yk::kYccWeightNone : yk::kYccWeightFloat, H, W, 0, ds, nullptr);
+            yk::ycc_chroma_finalize(ds, scale, ds + 2, ds + 3, nullptr);
+            if (grad) {
+                float* dg = dv.zeros(3ull * H * W);
+                yk::ycc_chroma_backward(dp, dt, false, dw, w.empty() ? yk::kYccWeightNone : yk::kYccWeightFloat, H, W, 0, ds + 3, dg,
+                                        nullptr);
+                cudaDeviceSynchronize(); // the kernels run on the current (non-blocking) stream: finish before the plain copy
+                *grad = YccDev::get(dg, 3ull * H * W);
+            }
+            cudaDeviceSynchronize();
+            const auto s = YccDev::get(ds, 4);
+            if (sums_out)
+                *sums_out = s;
+            return s[2];
+        }
+
+        std::vector<float> ycc_luma_host(YccDev& dv, const std::vector<float>& rgb, int H, int W) {
+            float* d = dv.alloc(rgb);
+            float* y = dv.zeros(static_cast<size_t>(H) * W);
+            lfs::training::kernels::ycc_luma(d, false, H, W, y, nullptr);
+            cudaDeviceSynchronize();
+            return YccDev::get(y, static_cast<size_t>(H) * W);
+        }
+
+        int run_ycccheck(const std::filesystem::path& out_dir) {
+            namespace yk = lfs::training::kernels;
+            std::filesystem::create_directories(out_dir);
+            const int H = 96, W = 128;
+            const size_t HW = static_cast<size_t>(H) * W;
+            std::mt19937 rng(5);
+            std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+            int bad = 0;
+            YccDev dv;
+            // a smooth target in [0.2, 0.8]
+            std::vector<float> tgt(3 * HW);
+            for (int c = 0; c < 3; ++c)
+                for (int y = 0; y < H; ++y)
+                    for (int x = 0; x < W; ++x)
+                        tgt[c * HW + y * W + x] = 0.5f + 0.25f * std::sin(0.07f * x + 1.3f * c) * std::cos(0.05f * y + 0.7f * c);
+            const float scale = 0.8f;
+            // (1) Cb-only checkerboard: dB = 1.8556 d, dG = -0.0722 x 1.8556 d / 0.7152, dR = 0 (Y and Cr unchanged)
+            const float d = 0.04f;
+            std::vector<float> chk = tgt;
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x) {
+                    const float s = ((x + y) & 1) ? -d : d;
+                    chk[2 * HW + y * W + x] += yk::kYccCbDen * s;
+                    chk[HW + y * W + x] += -yk::kYccKb * yk::kYccCbDen / yk::kYccKg * s;
+                }
+            const float l_chk = ycc_chroma(dv, chk, tgt, {}, H, W, scale, nullptr, nullptr);
+            const auto y_chk = ycc_luma_host(dv, chk, H, W), y_tgt = ycc_luma_host(dv, tgt, H, W);
+            double dy = 0;
+            for (size_t i = 0; i < HW; ++i)
+                dy = std::max(dy, static_cast<double>(std::abs(y_chk[i] - y_tgt[i])));
+            // (2) the same amplitude constant over each 2x2 block (alternating per block): chroma loss = scale d / 2
+            std::vector<float> blk = tgt;
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x) {
+                    const float s = (((x >> 1) + (y >> 1)) & 1) ? -d : d;
+                    blk[2 * HW + y * W + x] += yk::kYccCbDen * s;
+                    blk[HW + y * W + x] += -yk::kYccKb * yk::kYccCbDen / yk::kYccKg * s;
+                }
+            const float l_blk = ycc_chroma(dv, blk, tgt, {}, H, W, scale, nullptr, nullptr);
+            std::println("(1) Cb-only checkerboard finer than 2x2 (amplitude {:g} in Cb): chroma loss {:.3e} (vs {:.6f} for the same "
+                         "amplitude constant over 2x2 blocks); max |dY| {:.2e}",
+                         d, l_chk, l_blk, dy);
+            std::println("(2) 2x2-constant Cb step: chroma loss {:.7f}, expected scale x d / 2 = {:.7f}", l_blk, scale * d / 2);
+            if (!(l_chk < 1e-6f * l_blk + 1e-9f) || dy > 1e-6)
+                ++bad;
+            if (std::abs(l_blk - scale * d / 2) > 1e-6f)
+                ++bad;
+            // (3) random case + mask, dumped for the Python reference; central differences of the chroma loss
+            std::vector<float> pred(3 * HW), w(HW);
+            for (size_t i = 0; i < 3 * HW; ++i)
+                pred[i] = std::clamp(tgt[i] + 0.15f * (uni(rng) - 0.5f), 0.0f, 1.0f);
+            for (int y = 0; y < H; ++y)
+                for (int x = 0; x < W; ++x)
+                    w[y * W + x] = (std::hypot(x - 40.0, y - 50.0) < 18.0 || (x > 100 && y < 20) || ((x * 7 + y * 3) % 23 == 0)) ? 0.0f
+                                   : (x < 64 ? 1.0f : 1.5f);
+            std::vector<float> grad, sums;
+            const float loss = ycc_chroma(dv, pred, tgt, w, H, W, scale, &grad, &sums);
+            const auto y_pred = ycc_luma_host(dv, pred, H, W);
+            std::vector<float> gy(HW), grgb;
+            for (auto& v : gy)
+                v = uni(rng) - 0.5f;
+            {
+                float* dgy = dv.alloc(gy);
+                float* dg = dv.zeros(3 * HW);
+                yk::ycc_luma_grad_to_rgb(dgy, 1.7f, static_cast<int>(HW), dg, false, nullptr);
+                cudaDeviceSynchronize();
+                grgb = YccDev::get(dg, 3 * HW);
+            }
+            const auto put = [&](const char* n, const std::vector<float>& v) {
+                std::ofstream f(out_dir / std::format("{}.f32", n), std::ios::binary);
+                f.write(reinterpret_cast<const char*>(v.data()), static_cast<std::streamsize>(v.size() * sizeof(float)));
+            };
+            put("pred", pred);
+            put("tgt", tgt);
+            put("w", w);
+            put("y_pred", y_pred);
+            put("y_tgt", y_tgt);
+            put("grad", grad);
+            put("gy", gy);
+            put("grgb", grgb);
+            put("chk", chk);
+            {
+                std::ofstream info(out_dir / "ycc_case.txt");
+                info << std::format("H {}\nW {}\nscale {:.9g}\nloss {:.9g}\nabs_sum {:.9g}\nweight_sum {:.9g}\ncoef {:.9g}\n"
+                                    "luma_grad_scale 1.7\nchk_loss {:.9g}\nblk_loss {:.9g}\nd {:.9g}\n",
+                                    H, W, scale, loss, sums[0], sums[1], sums[3], l_chk, l_blk, d);
+            }
+            // central differences on 40 (pixel, channel) entries. The loss is a mean over the kept blocks: with ~2800 of them
+            // one entry moves it by ~1e-8, the size of the float32 atomic-sum noise. So the differences use the same images with
+            // only a 16x16-pixel patch weighted (one entry then moves the loss ~40x more), against that case's own analytic
+            // gradient, and skip entries whose block is within 4 steps of an L1 kink (|dCb| or |dCr| of the block mean).
+            std::vector<float> wp(HW, 0.0f);
+            for (int y = 32; y < 48; ++y)
+                for (int x = 80; x < 96; ++x)
+                    wp[y * W + x] = w[y * W + x];
+            std::vector<float> gp;
+            ycc_chroma(dv, pred, tgt, wp, H, W, scale, &gp, nullptr);
+            const auto blk_d = [&](int y, int x, int which) { // block-mean dCb (0) or dCr (1) of pred - tgt, in double
+                double s = 0;
+                for (int yy = y & ~1; yy < (y & ~1) + 2; ++yy)
+                    for (int xx = x & ~1; xx < (x & ~1) + 2; ++xx) {
+                        const size_t q = static_cast<size_t>(yy) * W + xx;
+                        double yp = 0, yt = 0;
+                        const double kk[3] = {yk::kYccKr, yk::kYccKg, yk::kYccKb};
+                        for (int c = 0; c < 3; ++c) {
+                            yp += kk[c] * pred[c * HW + q];
+                            yt += kk[c] * tgt[c * HW + q];
+                        }
+                        s += which == 0 ? ((pred[2 * HW + q] - yp) - (tgt[2 * HW + q] - yt)) / yk::kYccCbDen
+                                        : ((pred[q] - yp) - (tgt[q] - yt)) / yk::kYccCrDen;
+                    }
+                return s / 4.0;
+            };
+            double worst = 0;
+            int checked = 0;
+            const float h = 1e-3f;
+            for (int k = 0; k < 4000 && checked < 40; ++k) {
+                const int y = 32 + static_cast<int>(uni(rng) * 16) % 16, x = 80 + static_cast<int>(uni(rng) * 16) % 16;
+                const int c = static_cast<int>(uni(rng) * 3) % 3;
+                const size_t i = c * HW + static_cast<size_t>(y) * W + x;
+                if (wp[static_cast<size_t>(y) * W + x] == 0.0f || std::min(std::abs(blk_d(y, x, 0)), std::abs(blk_d(y, x, 1))) < 4.0 * 0.25 * h)
+                    continue;
+                auto pp = pred, pm = pred;
+                pp[i] += h;
+                pm[i] -= h;
+                const double hreal = static_cast<double>(pp[i]) - pm[i];
+                const double fd = (static_cast<double>(ycc_chroma(dv, pp, tgt, wp, H, W, scale, nullptr, nullptr)) -
+                                   ycc_chroma(dv, pm, tgt, wp, H, W, scale, nullptr, nullptr)) / hreal;
+                worst = std::max(worst, std::abs(fd - gp[i]) / std::max(1e-6, std::abs(static_cast<double>(gp[i]))));
+                ++checked;
+            }
+            std::println("(3) random render / target / mask ({}x{}; {} of {} pixels weighted, weights 1 and 1.5): chroma loss {:.7f}, "
+                         "kept 2x2-block weight sum {:.2f}; gradient vs central differences on {} entries: worst relative "
+                         "{:.2e}; inputs and outputs -> {}",
+                         W, H, std::count_if(w.begin(), w.end(), [](float v) { return v > 0; }), HW, loss, sums[1], checked, worst,
+                         out_dir.string());
+            if (worst > 2e-2)
+                ++bad;
+            std::println("{}", bad == 0 ? "YCCCHECK OK" : "YCCCHECK FAILED");
+            return bad == 0 ? 0 : 1;
+        }
+
+        // ---------------------------------------------------------------- --max-std-dev (LFQPLCY)
+        // The game's splat cut in the FastGS forward and backward (fr::set_splat_cutoff), on a pinhole scene of separated
+        // splats (some with opacities near 0.5/255 x e^(X^2/2), where the alpha floor binds instead of the cut):
+        //  renders with the cut off and at X, written to OUT_DIR with the scene for the Python reference
+        //  (D:/splat_work/lfrqplcy/cutcheck_ref.py: every pixel, edge pixels included);
+        //  analytic gradients (means, scales, rotations, opacities, SH0) with the cut against central differences of the full
+        //  forward, the image weights smooth everywhere except thin bands around each splat's cut ellipse and alpha contours
+        //  (where a step would move a pixel across the boundary: a jump no gradient carries), so pixels just inside the cut
+        //  and the ring the cut removes (sqrt(5)..3.3 sigma, nonzero weights there) are both checked;
+        //  control: the analytic gradient with the cut differs from the uncut backward's.
+        struct CutScene {
+            int W = 192, H = 144, n = 0;
+            float fx = 170.0f, fy = 170.0f, cx = 96.0f, cy = 72.0f;
+            std::vector<float> means, scales, rots, opac, sh0;
+            float bg[3] = {0.2f, 0.3f, 0.45f};
+            bool fish = false;     // native fisheye through the active radial lens table (cutcheck ... TABLE)
+            fr::FastGSLens lens{}; // pinhole unless fish
+        };
+        struct CutRun {
+            std::vector<float> img, alpha, g[5]; // means, scales, rotations, opacities, sh0
+        };
+
+        CutScene make_cut_scene(unsigned seed, const bool fish = false) {
+            CutScene s;
+            if (fish) { // a wide field through the table: the corner splats ~64 deg off the axis
+                s.fish = true;
+                s.fx = s.fy = 60.0f;
+                s.lens.model = fr::kLensFisheye;
+                s.lens.radial = lfs::training::active_radial_lens()->device_view();
+                const double tm = std::tan(75.0 * std::numbers::pi / 180.0);
+                s.lens.max_w = static_cast<float>(tm * tm);
+            }
+            std::mt19937 rng(seed);
+            std::uniform_real_distribution<float> uni(0.0f, 1.0f);
+            const float opacities[] = {0.9f, 0.6f, 0.35f, 0.12f, 0.05f, 0.03f, 0.024f, 0.02f, 0.012f, 0.008f};
+            int k = 0;
+            for (int j = 0; j < 4; ++j)
+                for (int i = 0; i < 6; ++i, ++k) {
+                    const float u = (i + 0.5f) * s.W / 6.0f + (uni(rng) - 0.5f) * 4.0f, v = (j + 0.5f) * s.H / 4.0f + (uni(rng) - 0.5f) * 4.0f;
+                    const float z = 2.5f + 1.5f * uni(rng);
+                    s.means.insert(s.means.end(), {(u - s.cx) / s.fx * z, (v - s.cy) / s.fy * z, z});
+                    for (int a = 0; a < 3; ++a) // 2D sigma ~1.5..4.5 px, anisotropic (fisheye: / 1.4, its edges magnify)
+                        s.scales.push_back(std::log((1.5f + 3.0f * uni(rng)) * z / s.fx / (fish ? 1.4f : 1.0f)));
+                    for (int a = 0; a < 4; ++a)
+                        s.rots.push_back(uni(rng) * 2.0f - 1.0f);
+                    const float o = opacities[k % 10];
+                    s.opac.push_back(std::log(o / (1.0f - o)));
+                    for (int a = 0; a < 3; ++a)
+                        s.sh0.push_back((uni(rng) - 0.5f) * 2.0f);
+                }
+            s.n = k;
+            if (fish) { // each centre at its grid point's distance from the image centre through the device's own projection
+                std::vector<double> lo(k, 0.0), hi(k, 75.0 * std::numbers::pi / 180.0), az(k), rt(k), dist(k);
+                for (int i = 0; i < k; ++i) {
+                    const double z = s.means[3 * i + 2], du = s.means[3 * i] / z * s.fx, dv = s.means[3 * i + 1] / z * s.fy;
+                    az[i] = std::atan2(dv, du);
+                    rt[i] = std::hypot(du, dv);
+                    dist[i] = z;
+                }
+                std::vector<float> in(9ull * k, 0.0f), out(17ull * k);
+                for (int it = 0; it < 50; ++it) { // bisection on theta (the projected radius grows with it)
+                    for (int i = 0; i < k; ++i) {
+                        const double th = 0.5 * (lo[i] + hi[i]);
+                        in[9ull * i] = static_cast<float>(std::sin(th) * std::cos(az[i]));
+                        in[9ull * i + 1] = static_cast<float>(std::sin(th) * std::sin(az[i]));
+                        in[9ull * i + 2] = static_cast<float>(std::cos(th));
+                    }
+                    fr::fisheye_projection_selftest(s.lens, s.fx, s.fy, s.cx, s.cy, in.data(), k, out.data());
+                    for (int i = 0; i < k; ++i) {
+                        const double mid = 0.5 * (lo[i] + hi[i]);
+                        (std::hypot(out[17ull * i] - s.cx, out[17ull * i + 1] - s.cy) < rt[i] ? lo[i] : hi[i]) = mid;
+                    }
+                }
+                for (int i = 0; i < k; ++i) {
+                    const double th = 0.5 * (lo[i] + hi[i]);
+                    s.means[3 * i] = static_cast<float>(dist[i] * std::sin(th) * std::cos(az[i]));
+                    s.means[3 * i + 1] = static_cast<float>(dist[i] * std::sin(th) * std::sin(az[i]));
+                    s.means[3 * i + 2] = static_cast<float>(dist[i] * std::cos(th));
+                }
+            }
+            return s;
+        }
+
+        // the fisheye scene's per-splat mean2d (2), Jacobian rows (3 + 3) from the device's own projection
+        // (fisheye_projection_selftest = the preprocess's fisheye::terms_lens + project; w2c is the identity)
+        std::vector<float> cut_proj(const CutScene& s) {
+            std::vector<float> in(9ull * s.n, 0.0f), out(17ull * s.n), pj(8ull * s.n);
+            for (int i = 0; i < s.n; ++i)
+                for (int a = 0; a < 3; ++a)
+                    in[9ull * i + a] = s.means[3ull * i + a];
+            fr::fisheye_projection_selftest(s.lens, s.fx, s.fy, s.cx, s.cy, in.data(), s.n, out.data());
+            for (int i = 0; i < s.n; ++i)
+                for (int a = 0; a < 8; ++a)
+                    pj[8ull * i + a] = out[17ull * i + a];
+            return pj;
+        }
+
+        CutRun cut_render(const CutScene& s, const std::vector<float>* w_img) {
+            const int N = s.n;
+            const size_t HW = static_cast<size_t>(s.W) * s.H;
+            YccDev dv;
+            float* dm = dv.alloc(s.means);
+            float* ds = dv.alloc(s.scales);
+            float* dr = dv.alloc(s.rots);
+            float* dop = dv.alloc(s.opac);
+            float* dsh = dv.alloc(s.sh0);
+            const std::vector<float> w2c = {1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+            float* dw2c = dv.alloc(w2c);
+            float* dcam = dv.zeros(3);
+            float* dimg = dv.zeros(3 * HW);
+            float* dal = dv.zeros(HW);
+            float* ddep = dv.zeros(HW);
+            float* dbg = dv.alloc({s.bg[0], s.bg[1], s.bg[2]});
+            auto ctx = fr::forward_raw(dm, ds, dr, dop, dsh, nullptr, dw2c, dcam, dimg, dal, ddep, nullptr, dbg, nullptr, N, 1, 1, s.W,
+                                       s.H, s.fx, s.fy, s.cx, s.cy, 0.01f, 1e10f, false, nullptr, nullptr, 0, 0, nullptr, 1.0f, s.lens);
+            if (!ctx.success) {
+                std::println(stderr, "forward failed: {}", ctx.error_message ? ctx.error_message : "?");
+                std::exit(1);
+            }
+            cudaDeviceSynchronize();
+            CutRun r;
+            r.img = YccDev::get(dimg, 3 * HW);
+            r.alpha = YccDev::get(dal, HW);
+            if (!w_img) {
+                fr::release_forward_context(ctx);
+                cudaDeviceSynchronize();
+                return r;
+            }
+            float* dgi = dv.alloc(*w_img);
+            float* g[5] = {dv.zeros(3ull * N), dv.zeros(3ull * N), dv.zeros(4ull * N), dv.zeros(N), dv.zeros(3ull * N)};
+            float* vals[5] = {dm, ds, dr, dop, dsh};
+            const int attrs[5] = {3, 3, 4, 1, 3};
+            fr::FusedAdamSettings fa;
+            fa.enabled = true;
+            fr::FusedAdamParam* prm[5] = {&fa.means, &fa.scaling, &fa.rotation, &fa.opacity, &fa.sh0};
+            for (int b = 0; b < 5; ++b) {
+                prm[b]->gradient_out = g[b];
+                prm[b]->param = vals[b];
+                prm[b]->n_primitives = N;
+                prm[b]->n_elements = N * attrs[b];
+                prm[b]->n_attributes = attrs[b];
+            }
+            fr::BackgroundAlphaGradient bgg; // the scene renders over bg: its -bg dT term, as the trainer passes it
+            bgg.bg_color = dbg;
+            const auto res = fr::backward_raw(nullptr, nullptr, dgi, bgg, nullptr, nullptr, dimg, dal, dm, ds, dr, dop,
+                                              nullptr, dw2c, dcam, ctx, nullptr, N, ctx.n_visible, 1, 1, s.W, s.H, s.fx, s.fy, s.cx, s.cy,
+                                              false, DensificationType::None, &fa);
+            cudaDeviceSynchronize();
+            if (!res.success) {
+                std::println(stderr, "backward failed: {}", res.error_message ? res.error_message : "?");
+                std::exit(1);
+            }
+            for (int b = 0; b < 5; ++b)
+                r.g[b] = YccDev::get(g[b], static_cast<size_t>(attrs[b]) * N);
+            return r;
+        }
+
+        // the scene's 2D means and conics (pinhole EWA + 0.3 px^2, as the preprocess) and opacities, in double
+        void cut_conics(const CutScene& s, std::vector<std::array<double, 6>>& out) {
+            out.clear();
+            const std::vector<float> pj = s.fish ? cut_proj(s) : std::vector<float>{}; // fisheye: the device's mean2d and J
+            for (int i = 0; i < s.n; ++i) {
+                const double X = s.means[3 * i], Y = s.means[3 * i + 1], Z = s.means[3 * i + 2];
+                double q[4] = {s.rots[4 * i], s.rots[4 * i + 1], s.rots[4 * i + 2], s.rots[4 * i + 3]};
+                const double qn = std::sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+                for (double& v : q)
+                    v /= qn;
+                const double r = q[0], x = q[1], y = q[2], z = q[3];
+                const double R[9] = {1 - 2 * (y * y + z * z), 2 * (x * y - r * z), 2 * (x * z + r * y), 2 * (x * y + r * z), 1 - 2 * (x * x + z * z),
+                                     2 * (y * z - r * x), 2 * (x * z - r * y), 2 * (y * z + r * x), 1 - 2 * (x * x + y * y)};
+                double var[3];
+                for (int a = 0; a < 3; ++a)
+                    var[a] = std::exp(2.0 * s.scales[3 * i + a]);
+                double S[9];
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b)
+                        S[3 * a + b] = R[3 * a] * var[0] * R[3 * b] + R[3 * a + 1] * var[1] * R[3 * b + 1] + R[3 * a + 2] * var[2] * R[3 * b + 2];
+                double J[6] = {s.fx / Z, 0, -s.fx * X / (Z * Z), 0, s.fy / Z, -s.fy * Y / (Z * Z)};
+                if (s.fish)
+                    for (int a = 0; a < 6; ++a)
+                        J[a] = pj[8ull * i + 2 + a];
+                double C[3] = {0, 0, 0};
+                for (int a = 0; a < 3; ++a)
+                    for (int b = 0; b < 3; ++b) {
+                        C[0] += J[a] * S[3 * a + b] * J[b];
+                        C[1] += J[a] * S[3 * a + b] * J[3 + b];
+                        C[2] += J[3 + a] * S[3 * a + b] * J[3 + b];
+                    }
+                C[0] += 0.3;
+                C[2] += 0.3;
+                const double det = C[0] * C[2] - C[1] * C[1];
+                out.push_back({s.fish ? pj[8ull * i] : s.fx * X / Z + s.cx, s.fish ? pj[8ull * i + 1] : s.fy * Y / Z + s.cy, C[2] / det,
+                               -C[1] / det, C[0] / det,
+                               1.0 / (1.0 + std::exp(-static_cast<double>(s.opac[i])))});
+            }
+        }
+
+        int run_cutcheck(const std::filesystem::path& out_dir, const float X, const std::string& table) {
+            std::filesystem::create_directories(out_dir);
+            if (!table.empty()) { // through the native fisheye and this radial lens table
+                try {
+                    lfs::training::activate_radial_lens(lfs::training::load_radial_lens_table(table));
+                } catch (const std::exception& e) {
+                    std::println(stderr, "{}", e.what());
+                    return 1;
+                }
+                std::println("lens: native fisheye through {}", lfs::training::active_radial_lens()->describe());
+            }
+            const CutScene s = make_cut_scene(3, !table.empty());
+            const size_t HW = static_cast<size_t>(s.W) * s.H;
+            const auto put = [&](const std::string& n, const std::vector<float>& v) {
+                std::ofstream f(out_dir / (n + ".f32"), std::ios::binary);
+                f.write(reinterpret_cast<const char*>(v.data()), static_cast<std::streamsize>(v.size() * sizeof(float)));
+            };
+            {
+                std::ofstream f(out_dir / "cut_scene.txt");
+                f << std::format("W {}\nH {}\nfx {:.9g}\nfy {:.9g}\ncx {:.9g}\ncy {:.9g}\nbg {:.9g} {:.9g} {:.9g}\nN {}\nX {:.9g}\n", s.W, s.H, s.fx,
+                                 s.fy, s.cx, s.cy, s.bg[0], s.bg[1], s.bg[2], s.n, X);
+                f << "lens " << (s.fish ? "fisheye" : "pinhole") << "\n";
+            }
+            if (s.fish) {
+                std::ofstream f(out_dir / "proj.f32", std::ios::binary);
+                const auto pj = cut_proj(s);
+                f.write(reinterpret_cast<const char*>(pj.data()), static_cast<std::streamsize>(pj.size() * sizeof(float)));
+            }
+            put("means", s.means);
+            put("scales", s.scales);
+            put("rots", s.rots);
+            put("opac", s.opac);
+            put("sh0", s.sh0);
+            int bad = 0;
+            fr::set_splat_cutoff(0.0f);
+            const auto off = cut_render(s, nullptr);
+            const auto cut = fr::set_splat_cutoff(X);
+            const auto on = cut_render(s, nullptr);
+            put("img_off", off.img);
+            put("alpha_off", off.alpha);
+            put("img_cut", on.img);
+            put("alpha_cut", on.alpha);
+            double dmax = 0;
+            for (size_t i = 0; i < 3 * HW; ++i)
+                dmax = std::max(dmax, static_cast<double>(std::abs(on.img[i] - off.img[i])));
+            std::println("cut {:.7f} sigma: half z^2 max {:.7f}, min alpha {:.7f}; renders written to {} (the cut changes the image by up to {:.4f})",
+                         X, cut.half_z2_max, cut.min_alpha, out_dir.string(), dmax);
+            if (!(dmax > 1e-3))
+                ++bad;
+            // weights: smooth, zero in bands around each splat's cut ellipse and alpha contours
+            std::vector<std::array<double, 6>> cs;
+            cut_conics(s, cs);
+            std::vector<float> w(3 * HW);
+            size_t banded = 0, ring = 0;
+            const double hz = 0.5 * X * X, band = 0.3;
+            for (int y = 0; y < s.H; ++y)
+                for (int x = 0; x < s.W; ++x) {
+                    bool keep = true;
+                    for (const auto& c : cs) {
+                        const double dx = c[0] - (x + 0.5), dy = c[1] - (y + 0.5);
+                        const double h2 = 0.5 * (c[2] * dx * dx + c[4] * dy * dy) + c[3] * dx * dy; // z^2 / 2
+                        const double ha = std::log(c[5] / cut.min_alpha), h255 = std::log(c[5] * 255.0);
+                        if (std::abs(h2 - hz) < band || std::abs(h2 - ha) < band || std::abs(h2 - h255) < band)
+                            keep = false;
+                        if (h2 > std::min(hz, ha) + band && h2 < h255 - band)
+                            ++ring;
+                    }
+                    banded += !keep;
+                    for (int ch = 0; ch < 3; ++ch)
+                        w[ch * HW + y * s.W + x] = keep ? static_cast<float>(0.3 + std::sin(0.11 * x + 1.7 * ch) * std::cos(0.09 * y + 0.5 * ch)) : 0.0f;
+                }
+            put("w_img", w);
+            const auto an = cut_render(s, &w);
+            const char* names[5] = {"means", "scales", "rotations", "opacities", "sh0"};
+            const double steps[5] = {5e-4, 5e-4, 1e-3, 1e-3, 1e-2};
+            std::println("gradient check with the cut ({} of {} pixels banded out; {} pixel-splat pairs in the ring the cut removes carry weight): "
+                         "relative error per block (|fd - analytic| / |analytic|)",
+                         banded, HW, ring);
+            double worst = 0;
+            for (int b = 0; b < 5; ++b) {
+                double nd = 0, na = 0;
+                const int attrs = b == 2 ? 4 : (b == 3 ? 1 : 3);
+                for (int i = 0; i < s.n; ++i)
+                    for (int a = 0; a < attrs; ++a) {
+                        auto sp = s, sm = s;
+                        std::vector<float>* vp[5] = {&sp.means, &sp.scales, &sp.rots, &sp.opac, &sp.sh0};
+                        std::vector<float>* vm[5] = {&sm.means, &sm.scales, &sm.rots, &sm.opac, &sm.sh0};
+                        (*vp[b])[attrs * i + a] += static_cast<float>(steps[b]);
+                        (*vm[b])[attrs * i + a] -= static_cast<float>(steps[b]);
+                        const double hreal = static_cast<double>((*vp[b])[attrs * i + a]) - (*vm[b])[attrs * i + a];
+                        const auto rp = cut_render(sp, nullptr), rm = cut_render(sm, nullptr);
+                        double lp = 0, lm = 0;
+                        for (size_t p = 0; p < 3 * HW; ++p) {
+                            lp += static_cast<double>(rp.img[p]) * w[p];
+                            lm += static_cast<double>(rm.img[p]) * w[p];
+                        }
+                        const double fd = (lp - lm) / hreal, ag = an.g[b][attrs * i + a];
+                        nd += (fd - ag) * (fd - ag);
+                        na += ag * ag;
+                    }
+                const double e = std::sqrt(nd) / std::max(std::sqrt(na), 1e-30);
+                worst = std::max(worst, e);
+                std::println("   {:<10} {:.3e}  (|analytic| {:.4e})", names[b], e, std::sqrt(na));
+            }
+            if (worst > 2e-2)
+                ++bad;
+            fr::set_splat_cutoff(0.0f);
+            const auto an_off = cut_render(s, &w);
+            fr::set_splat_cutoff(X);
+            double nd = 0, na = 0;
+            for (int b = 0; b < 5; ++b)
+                for (size_t i = 0; i < an.g[b].size(); ++i) {
+                    const double d = static_cast<double>(an.g[b][i]) - an_off.g[b][i];
+                    nd += d * d;
+                    na += static_cast<double>(an.g[b][i]) * an.g[b][i];
+                }
+            const double ctl = std::sqrt(nd / std::max(na, 1e-30));
+            std::println("control: the gradient with the cut differs from the uncut backward's by {:.3e} (relative): the backward cuts too", ctl);
+            if (!(ctl > 1e-3))
+                ++bad;
+            // AT the cut boundary: weights only on pixels just inside (z^2/2 in [hz - 0.25, hz - 0.02]) or just outside
+            // ([hz + 0.02, hz + 0.25]) one splat's cut, a splat whose alpha floor is well past the cut (log(o / min_alpha) >
+            // hz + 0.3), with no other splat reaching the pixel (z^2/2 > log(o / min_alpha) + band for every other one). Steps
+            // small enough that no weighted pixel crosses the cut (a step moves z^2/2 there by < 0.015). Inside: the analytic
+            // gradient = the central differences; outside: with the cut the analytic gradient and the differences are exactly
+            // 0, without it the analytic gradient is not (the uncut backward reaches the ring the cut removes).
+            {
+                std::vector<float> w_in(3 * HW, 0.0f), w_out(3 * HW, 0.0f);
+                size_t n_in = 0, n_out = 0;
+                for (int y = 0; y < s.H; ++y)
+                    for (int x = 0; x < s.W; ++x) {
+                        int owner = -1, others = 0;
+                        double ho = 0;
+                        for (int i = 0; i < s.n; ++i) {
+                            const auto& c = cs[i];
+                            const double dx = c[0] - (x + 0.5), dy = c[1] - (y + 0.5);
+                            const double h2 = 0.5 * (c[2] * dx * dx + c[4] * dy * dy) + c[3] * dx * dy;
+                            const double ha = std::log(c[5] / cut.min_alpha), off = std::abs(h2 - hz);
+                            if (owner < 0 && off > 0.02 && off < 0.25 && ha > hz + 0.3) {
+                                owner = i;
+                                ho = h2;
+                            } else if (!(h2 > ha + band))
+                                ++others;
+                        }
+                        if (owner < 0 || others > 0)
+                            continue;
+                        auto& wt = ho < hz ? w_in : w_out;
+                        ++(ho < hz ? n_in : n_out);
+                        for (int ch = 0; ch < 3; ++ch)
+                            wt[ch * HW + y * s.W + x] = static_cast<float>(0.8 + 0.4 * std::sin(0.11 * x + 1.7 * ch) * std::cos(0.09 * y + 0.5 * ch));
+                    }
+                const double qsteps[5] = {1.25e-4, 5e-4, 5e-5, 1e-3, 1e-2};
+                // -> worst relative block error |fd - analytic| / |analytic| (0 when both vanish); |fd| and max |analytic|
+                const auto fd_vs = [&](const std::vector<float>& wt, const CutRun& an, double& fd_norm, double& an_max) {
+                    double worst_b = 0;
+                    fd_norm = 0;
+                    an_max = 0;
+                    for (int b = 0; b < 5; ++b) {
+                        double nd = 0, na = 0;
+                        const int attrs = b == 2 ? 4 : (b == 3 ? 1 : 3);
+                        for (int i = 0; i < s.n; ++i)
+                            for (int a = 0; a < attrs; ++a) {
+                                auto sp = s, sm = s;
+                                std::vector<float>* vp[5] = {&sp.means, &sp.scales, &sp.rots, &sp.opac, &sp.sh0};
+                                std::vector<float>* vm[5] = {&sm.means, &sm.scales, &sm.rots, &sm.opac, &sm.sh0};
+                                (*vp[b])[attrs * i + a] += static_cast<float>(qsteps[b]);
+                                (*vm[b])[attrs * i + a] -= static_cast<float>(qsteps[b]);
+                                const double hreal = static_cast<double>((*vp[b])[attrs * i + a]) - (*vm[b])[attrs * i + a];
+                                const auto rp = cut_render(sp, nullptr), rm = cut_render(sm, nullptr);
+                                double lp = 0, lm = 0;
+                                for (size_t p = 0; p < 3 * HW; ++p) {
+                                    lp += static_cast<double>(rp.img[p]) * wt[p];
+                                    lm += static_cast<double>(rm.img[p]) * wt[p];
+                                }
+                                const double fd = (lp - lm) / hreal, ag = an.g[b][attrs * i + a];
+                                nd += (fd - ag) * (fd - ag);
+                                na += ag * ag;
+                                fd_norm += fd * fd;
+                                an_max = std::max(an_max, std::abs(ag));
+                            }
+                        if (nd > 0)
+                            worst_b = std::max(worst_b, std::sqrt(nd) / std::max(std::sqrt(na), 1e-30));
+                    }
+                    fd_norm = std::sqrt(fd_norm);
+                    return worst_b;
+                };
+                const auto an_in = cut_render(s, &w_in), an_out = cut_render(s, &w_out);
+                double fd_in = 0, g_in = 0, fd_out = 0, g_out = 0;
+                const double e_in = fd_vs(w_in, an_in, fd_in, g_in);
+                fd_vs(w_out, an_out, fd_out, g_out);
+                fr::set_splat_cutoff(0.0f);
+                const auto an_out_off = cut_render(s, &w_out);
+                fr::set_splat_cutoff(X);
+                double g_out_off = 0;
+                for (int b = 0; b < 5; ++b)
+                    for (const float v : an_out_off.g[b])
+                        g_out_off = std::max(g_out_off, static_cast<double>(std::abs(v)));
+                std::println("at the cut boundary ({} pixels just inside, {} just outside one splat's cut: z^2/2 0.02..0.25 from {:.4f}): "
+                             "inside: central differences vs analytic, worst relative block error {:.3e} (|fd| {:.3e}, max |analytic| "
+                             "{:.3e}); outside, with the cut: max |analytic| {:.3e}, |fd| {:.3e} (both must be 0); without the cut max "
+                             "|analytic| there {:.3e} (must be > 0)",
+                             n_in, n_out, hz, e_in, fd_in, g_in, g_out, fd_out, g_out_off);
+                if (n_in < 20 || n_out < 20 || !(e_in <= 2e-2) || !(g_in > 0.0) || g_out != 0.0 || fd_out != 0.0 || !(g_out_off > 0.0))
+                    ++bad;
+            }
+            fr::set_splat_cutoff(0.0f);
+            std::println("{}", bad == 0 ? "CUTCHECK OK" : "CUTCHECK FAILED");
+            return bad == 0 ? 0 : 1;
+        }
+
     } // namespace
 
     int run_lfe_fisheye_tool(int argc, const char* const* argv) {
@@ -1457,8 +2068,13 @@ namespace lfs::app {
             return run_radialcheck(argv[3], argc >= 5 && std::string(argv[4]) == "--vs-poly");
         if (argc >= 4 && std::string(argv[2]) == "cuberaycheck")
             return run_cuberaycheck(argv[3]);
+        if (argc >= 4 && std::string(argv[2]) == "ycccheck")
+            return run_ycccheck(argv[3]);
+        if (argc >= 4 && std::string(argv[2]) == "cutcheck")
+            return run_cutcheck(argv[3], argc >= 5 ? std::stof(argv[4]) : 2.2360680f, argc >= 6 ? std::string(argv[5]) : std::string());
         std::println(stderr, "usage: LichtFeld-Studio lfe-fisheye render <model.ply> <cameras.txt> <out_dir> | projcheck | gradcheck | "
-                             "radialcheck <lens_radial.txt> [--vs-poly] | cuberaycheck <lens_radial.txt>");
+                             "radialcheck <lens_radial.txt> [--vs-poly] | cuberaycheck <lens_radial.txt> | ycccheck <out_dir> | "
+                             "cutcheck <out_dir> [max_std_dev [lens_radial.txt]]");
         return 2;
     }
 

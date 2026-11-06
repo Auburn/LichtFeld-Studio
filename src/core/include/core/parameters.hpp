@@ -263,6 +263,17 @@ namespace lfs::core {
             // follows the ROI-weighted error with no fixed split.
             float cropbox_growth_inside = 0.0f;
             float lambda_dssim = 0.2f;
+            // --loss-ycc (LFQPLCY): the photometric loss in BT.709 full-range Y'CbCr of exactly the R'G'B' the RGB loss sees
+            // (after the cubemap composite and PPISP) and of the target: L1 + D-SSIM on luma Y at full resolution (the
+            // lambda_dssim split; the luma L1 scaled by loss_ycc_luma_scale) plus loss_ycc_chroma_weight x the L1 of Cb and Cr
+            // after a 2x2 box downsample of both (half resolution; only fully kept 2x2 blocks of the mask). Off: the RGB loss.
+            bool loss_ycc = false;
+            float loss_ycc_chroma_weight = 1.0f;
+            float loss_ycc_luma_scale = 1.0f;
+            // --max-std-dev X (LFQPLCY): cut every splat as the game renderer fpv-render does: a pixel takes part only within
+            // X standard deviations (Mahalanobis, in the dilated 2D covariance) and above alpha 0.5/255; the tile radius
+            // shrinks to match. 0 = off (the trainer's own ~3-sigma, alpha >= 1/255 extent). The game: sqrt(5) = 2.2360680.
+            float max_std_dev = 0.0f;
             float min_opacity = 0.005f;
             size_t refine_every = 100;
             size_t start_refine = 500;

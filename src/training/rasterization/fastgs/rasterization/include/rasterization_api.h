@@ -193,6 +193,12 @@ namespace fast_lfs::rasterization {
     void fisheye_projection_selftest(const FastGSLens& lens, float fx, float fy, float cx, float cy,
                                      const float* host_in, int n, float* host_out);
 
+    // --max-std-dev (LFQPLCY): the process-wide splat cut of the forward and backward (SplatCutoffParams). max_std_dev 0:
+    // off (the original tests); X > 0: the game's cut, z <= X sigma and alpha >= 0.5/255. Returns what was set; throws on
+    // a CUDA error. splat_cutoff() = the current setting.
+    SplatCutoffParams set_splat_cutoff(float max_std_dev);
+    [[nodiscard]] SplatCutoffParams splat_cutoff();
+
     /// cudaPointerGetAttributes preflight call count (0 in Release/NDEBUG).
     [[nodiscard]] std::uint64_t preflight_pointer_attr_call_count() noexcept;
     void reset_preflight_pointer_attr_call_count() noexcept;

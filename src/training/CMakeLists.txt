@@ -20,6 +20,7 @@ set(LFS_TRAINING_KERNEL_SOURCES
     kernels/rolling_shutter_update.cu
     kernels/pose_refinement_update.cu
     kernels/bg_cubemap.cu
+    kernels/ycc_loss.cu
     kernels/ssim.cu
     kernels/l1_loss.cu
     kernels/ssim_reduction.cu

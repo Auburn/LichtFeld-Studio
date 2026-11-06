@@ -59,6 +59,7 @@
 #include "python/runner.hpp"
 #include "rasterization/fast_rasterizer.hpp"
 #include "rasterization/radial_lens_table.hpp"
+#include "kernels/ycc_loss.hpp"
 #include "rasterization/gsplat/GeometryFeatures.h"
 #include "rasterization/gsplat/Ops.h"
 #include "rasterization/gsplat_rasterizer.hpp"
@@ -2277,7 +2278,8 @@ namespace lfs::training {
             .raw_gradient = raw_gradient,
             .raw_residual = raw_residual,
             .grad_alpha = grad_alpha,
-            .normal_pixel_weight = user_masks_photometric && normal_terms_on ? base_photometric_weight : Tensor{}};
+            .normal_pixel_weight = user_masks_photometric && normal_terms_on ? base_photometric_weight : Tensor{},
+            .photometric_weight = photometric_weight};
     }
 
     // Returns GPU tensor for loss - NO SYNC!
@@ -3543,6 +3545,45 @@ namespace lfs::training {
                                                         pose_refinement_->settings().start)
                                           : std::string("= the dataset's"),
                          params.optimization.use_ppisp ? "PPISP" : (params.optimization.use_exposure_correction ? "exposure correction" : "none"));
+            }
+
+            // --max-std-dev (LFQPLCY): the game's splat cut in the FastGS forward and backward (process-wide; reset when off)
+            {
+                const float X = params.optimization.max_std_dev;
+                const auto cut = fast_lfs::rasterization::set_splat_cutoff(X);
+                if (X > 0.0f)
+                    LOG_INFO("Splat cutoff (--max-std-dev): {:.7f} sigma, as the game renderer (fpv-render) draws: a pixel takes part in a "
+                             "splat only when z^2 = d^T Sigma^-1 d <= {:.7f} (Sigma = its EWA 2D covariance through the camera's lens "
+                             "+ 0.3 px^2 dilation, as the game's) and alpha = opacity exp(-z^2/2) >= {:.6f} (0.5/255, the game's min alpha; "
+                             "1/255 without the flag), in the forward and the backward; tile, exact-tile and warp-cull radius "
+                             "min({:.7f}, sqrt(2 ln(opacity / {:.6f}))) sigma (without the flag sqrt(2 ln(255 opacity))); the game's "
+                             "512-px quad clamp is not reproduced",
+                             X, 2.0f * cut.half_z2_max, cut.min_alpha, X, cut.min_alpha);
+            }
+
+            // --loss-ycc (LFQPLCY): the photometric loss in BT.709 full-range Y'CbCr (kernels/ycc_loss.hpp)
+            ycc_loss_ = params.optimization.loss_ycc;
+            if (ycc_loss_) {
+                const float lam = params.optimization.lambda_dssim, s = params.optimization.loss_ycc_luma_scale;
+                // x 3: the RGB loss sums its three channels' L1 + D-SSIM per pixel (ssim_reduction.cu), so a pure luma error,
+                // which moves R', G', B' alike, costs 3 x its Y loss there: the luma term carries that factor to cost the same
+                constexpr float kRgbChannels = 3.0f;
+                const float base = (1.0f - lam) * s + lam;
+                ycc_scale_ = kRgbChannels * base;
+                ycc_lambda_ = base > 0.0f ? lam / base : 0.0f;
+                ycc_chroma_scale_ = (1.0f - lam) * params.optimization.loss_ycc_chroma_weight;
+                LOG_INFO("YCbCr loss (--loss-ycc): BT.709 full range (Y = 0.2126 R + 0.7152 G + 0.0722 B, Cb = (B - Y) / 1.8556, "
+                         "Cr = (R - Y) / 1.5748) on the R'G'B' the RGB loss sees (after the cubemap composite and {}) and on "
+                         "the target: luma at full resolution 3 x ({:g} x L1 x {:g} + {:g} x D-SSIM) (x 3: the RGB loss sums its "
+                         "three channels, so a pure luma error costs the same; replacing the RGB L1 + D-SSIM); "
+                         "chroma Cb, Cr after a 2x2 box (half resolution) {:g} x L1 x {:g} (chroma weight {:g}); masks: only fully "
+                         "kept 2x2 blocks enter the chroma term, weighted by their mean weight; gradients through the appearance "
+                         "model and the composite as for the RGB loss; the gradient loss (weight {:g}{}) stays on R'G'B' as without "
+                         "the flag",
+                         params.optimization.use_ppisp ? "PPISP" : (params.optimization.use_exposure_correction ? "exposure correction" : "no appearance model"),
+                         1.0f - lam, s, lam, 1.0f - lam, params.optimization.loss_ycc_chroma_weight,
+                         params.optimization.loss_ycc_chroma_weight, params.optimization.gradient_loss_weight,
+                         params.optimization.gradient_loss_weight > 0.0f ? ", from iteration 2000" : "");
             }
 
             // Initialize background color tensor from params
@@ -7973,11 +8014,38 @@ namespace lfs::training {
                                 use_mask && params_.optimization.mask_mode != lfs::core::param::MaskMode::AlphaConsistent
                                     ? mask_tile
                                     : lfs::core::Tensor{});
+                            // --loss-ycc (LFQPLCY): the same loss functions on luma images (the chroma term follows below)
+                            const cudaStream_t ycc_stream = lfs::core::getCurrentCUDAStream();
+                            const auto ycc_luma_of = [&](const lfs::core::Tensor& img, lfs::core::Tensor& buf) -> lfs::core::Tensor {
+                                const auto c = img.contiguous();
+                                const size_t H = c.shape()[c.ndim() - 2], W = c.shape()[c.ndim() - 1];
+                                LFS_ASSERT_MSG(c.numel() == 3 * H * W, "--loss-ycc needs 3-channel images");
+                                if (!buf.is_valid() || buf.numel() != H * W)
+                                    buf = lfs::core::Tensor::empty({1, H, W}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
+                                buf.set_stream(ycc_stream);
+                                c.sync_to_stream(ycc_stream);
+                                const bool u8 = c.dtype() == lfs::core::DataType::UInt8;
+                                lfs::training::kernels::ycc_luma(u8 ? static_cast<const void*>(c.ptr<uint8_t>()) : static_cast<const void*>(c.ptr<float>()),
+                                                                 u8, static_cast<int>(H), static_cast<int>(W), buf.ptr<float>(), ycc_stream);
+                                return buf;
+                            };
+                            lfs::core::param::OptimizationParameters ycc_params;
+                            lfs::core::Tensor ycc_weight;
+                            if (ycc_loss_) {
+                                ycc_params = step_params;
+                                ycc_params.lambda_dssim = ycc_lambda_;
+                            }
+                            const auto& loss_params = ycc_loss_ ? ycc_params : step_params;
+                            const lfs::core::Tensor loss_corrected = ycc_loss_ ? ycc_luma_of(corrected_image, ycc_y_corrected_) : corrected_image;
+                            const lfs::core::Tensor loss_gt = ycc_loss_ ? ycc_luma_of(gt_tile, ycc_y_gt_) : gt_tile;
+                            const lfs::core::Tensor loss_raw = ycc_loss_ && raw_loss_input.is_valid() && raw_loss_input.numel() > 0
+                                                                   ? ycc_luma_of(raw_loss_input, ycc_y_raw_)
+                                                                   : raw_loss_input;
                             if (use_mask || roi_weight.is_valid() || structure_map.is_valid() || loss_weight.is_valid()) {
 
                                 auto result = compute_photometric_loss_with_mask(
-                                    corrected_image, gt_tile, mask_tile, roi_weight, output.alpha,
-                                    step_params, raw_loss_input, structure_map, iter, generated_view, loss_weight);
+                                    loss_corrected, loss_gt, mask_tile, roi_weight, output.alpha,
+                                    loss_params, loss_raw, structure_map, iter, generated_view, loss_weight);
                                 if (!result) {
                                     nvtxRangePop();
                                     nvtxRangePop();
@@ -7997,9 +8065,10 @@ namespace lfs::training {
                                 tile_raw_residual = result->raw_residual;
                                 tile_grad_alpha = result->grad_alpha;
                                 normal_terms_weight = result->normal_pixel_weight;
+                                ycc_weight = result->photometric_weight;
                             } else {
                                 auto result = compute_photometric_loss_with_gradient(
-                                    corrected_image, gt_tile, step_params, raw_loss_input, iter, generated_view);
+                                    loss_corrected, loss_gt, loss_params, loss_raw, iter, generated_view);
                                 if (!result) {
                                     nvtxRangePop();
                                     nvtxRangePop();
@@ -8017,6 +8086,128 @@ namespace lfs::training {
                                 tile_grad = result->grad_corrected;
                                 tile_raw_gradient = result->raw_gradient;
                                 tile_raw_residual = result->raw_residual;
+                            }
+                            if (ycc_loss_) {
+                                // the gradient loss (MRNF's default weight 1.8, from iteration 2000) stays the R'G'B' term it is
+                                // without the flag: the call above built its residual from the Y inputs; point it back at the
+                                // R'G'B' raw composite and target (same pixel weight; the backward applies step_params' weight).
+                                // Without an appearance model it would sit in the Y gradient: refused by the parameter check.
+                                if (tile_raw_residual) {
+                                    LFS_ASSERT_MSG(raw_loss_input.is_valid() && raw_loss_input.numel() > 0, "--loss-ycc: gradient residual without a raw composite");
+                                    tile_raw_residual->raw = raw_loss_input;
+                                    tile_raw_residual->target = gt_tile;
+                                }
+                                LFS_ASSERT_MSG(!(step_params.gradient_loss_weight != 0.0f && iter >= kernels::GRADIENT_LOSS_START_STEP) || tile_raw_residual,
+                                               "--loss-ycc: the gradient loss needs the raw-composite path (an appearance model)");
+                                // luma gradient [1, H, W] (x K) -> R'G'B', then the half-resolution chroma L1 and its gradient
+                                const auto pred = corrected_image.contiguous();
+                                const auto tgt = gt_tile.contiguous();
+                                const int H = static_cast<int>(pred.shape()[pred.ndim() - 2]);
+                                const int W = static_cast<int>(pred.shape()[pred.ndim() - 1]);
+                                if (!ycc_grad_rgb_.is_valid() || ycc_grad_rgb_.numel() != pred.numel())
+                                    ycc_grad_rgb_ = lfs::core::Tensor::empty({3, static_cast<size_t>(H), static_cast<size_t>(W)},
+                                                                             lfs::core::Device::CUDA, lfs::core::DataType::Float32);
+                                if (!ycc_scalars_.is_valid())
+                                    ycc_scalars_ = lfs::core::Tensor::zeros({4}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
+                                const auto gy = tile_grad.contiguous();
+                                LFS_ASSERT_MSG(gy.numel() == static_cast<size_t>(H) * W, "--loss-ycc: luma gradient size");
+                                gy.sync_to_stream(ycc_stream);
+                                pred.sync_to_stream(ycc_stream);
+                                tgt.sync_to_stream(ycc_stream);
+                                lfs::training::kernels::ycc_luma_grad_to_rgb(gy.ptr<float>(), ycc_scale_, H * W, ycc_grad_rgb_.ptr<float>(),
+                                                                             false, ycc_stream);
+                                const bool tu8 = tgt.dtype() == lfs::core::DataType::UInt8;
+                                const void* tptr = tu8 ? static_cast<const void*>(tgt.ptr<uint8_t>()) : static_cast<const void*>(tgt.ptr<float>());
+                                lfs::core::Tensor wmap;
+                                int wkind = lfs::training::kernels::kYccWeightNone;
+                                const void* wptr = nullptr;
+                                if (ycc_weight.is_valid() && ycc_weight.numel() > 0) {
+                                    wmap = ycc_weight.contiguous();
+                                    LFS_ASSERT_MSG(wmap.numel() == static_cast<size_t>(H) * W, "--loss-ycc: weight map size");
+                                    wmap.sync_to_stream(ycc_stream);
+                                    if (wmap.dtype() == lfs::core::DataType::Float32) {
+                                        wkind = lfs::training::kernels::kYccWeightFloat;
+                                        wptr = wmap.ptr<float>();
+                                    } else {
+                                        wkind = lfs::training::kernels::kYccWeightU8;
+                                        wptr = wmap.ptr<uint8_t>();
+                                    }
+                                }
+                                const int border = wkind == lfs::training::kernels::kYccWeightNone ? 5 : 0; // the unmasked loss's valid padding
+                                float* sc = ycc_scalars_.ptr<float>();
+                                cudaMemsetAsync(sc, 0, 2 * sizeof(float), ycc_stream);
+                                lfs::training::kernels::ycc_chroma_sums(pred.ptr<float>(), tptr, tu8, wptr, wkind, H, W, border, sc, ycc_stream);
+                                lfs::training::kernels::ycc_chroma_finalize(sc, ycc_chroma_scale_, sc + 2, sc + 3, ycc_stream);
+                                lfs::training::kernels::ycc_chroma_backward(pred.ptr<float>(), tptr, tu8, wptr, wkind, H, W, border, sc + 3,
+                                                                            ycc_grad_rgb_.ptr<float>(), ycc_stream);
+                                const auto luma_loss = tile_loss.contiguous();
+                                LFS_ASSERT_MSG(luma_loss.numel() == 1, "--loss-ycc: scalar luma loss");
+                                luma_loss.sync_to_stream(ycc_stream);
+                                if (!ycc_total_.is_valid() || ycc_total_.shape() != luma_loss.shape())
+                                    ycc_total_ = lfs::core::Tensor::zeros(luma_loss.shape(), lfs::core::Device::CUDA, lfs::core::DataType::Float32);
+                                if (!ycc_luma_loss_.is_valid() || ycc_luma_loss_.shape() != luma_loss.shape())
+                                    ycc_luma_loss_ = lfs::core::Tensor::zeros(luma_loss.shape(), lfs::core::Device::CUDA, lfs::core::DataType::Float32);
+                                cudaMemcpyAsync(ycc_luma_loss_.ptr<float>(), luma_loss.ptr<float>(), sizeof(float), cudaMemcpyDeviceToDevice, ycc_stream);
+                                lfs::training::kernels::ycc_combine_loss(luma_loss.ptr<float>(), ycc_scale_, sc + 2, ycc_total_.ptr<float>(), ycc_stream);
+                                ycc_total_.set_stream(ycc_stream);
+                                ycc_grad_rgb_.set_stream(ycc_stream);
+                                tile_loss = ycc_total_;
+                                tile_grad = ycc_grad_rgb_;
+                                // log the two parts every 1000 iterations (a readback at that cadence only)
+                                if (iter == 1 || iter % 1000 == 0) {
+                                    float hs[4] = {}, hl = 0.0f, ht = 0.0f;
+                                    cudaMemcpyAsync(hs, sc, sizeof(hs), cudaMemcpyDeviceToHost, ycc_stream);
+                                    cudaMemcpyAsync(&hl, ycc_luma_loss_.ptr<float>(), sizeof(float), cudaMemcpyDeviceToHost, ycc_stream);
+                                    cudaMemcpyAsync(&ht, ycc_total_.ptr<float>(), sizeof(float), cudaMemcpyDeviceToHost, ycc_stream);
+                                    cudaStreamSynchronize(ycc_stream);
+                                    LOG_INFO("iter {}: YCbCr loss {:.5f} = luma {:.5f} x {:g} + chroma {:.5f} (mean |dCb|, |dCr| {:.5f} over {:.0f} "
+                                             "weighted 2x2 blocks of {})", iter, ht, hl, ycc_scale_, hs[2], hs[1] > 0.0f ? hs[0] / (2.0f * hs[1]) : 0.0f,
+                                             hs[1], (H / 2) * (W / 2));
+                                }
+                                // test hook LFS_YCC_DUMP=<iterations>: the inputs, the parts and the gradients, for the Python reference
+                                if (const char* yd = std::getenv("LFS_YCC_DUMP"); yd != nullptr && *yd) {
+                                    bool now = false;
+                                    for (std::string_view list(yd); !list.empty();) {
+                                        const size_t comma = list.find(',');
+                                        if (std::atoi(std::string(list.substr(0, comma)).c_str()) == iter)
+                                            now = true;
+                                        if (comma == std::string_view::npos)
+                                            break;
+                                        list.remove_prefix(comma + 1);
+                                    }
+                                    if (now) {
+                                        const auto dd = params_.dataset.output_path / "ycc_dump";
+                                        std::string err;
+                                        const auto w = [&](const char* n, const lfs::core::Tensor& t) {
+                                            if (t.is_valid() && t.numel() > 0 &&
+                                                !BackgroundCubemap::write_tensor_npy(dd / std::format("{}_{}.npy", n, iter), t, err, ycc_stream))
+                                                LOG_ERROR("ycc dump: {}", err);
+                                        };
+                                        w("corrected", pred);
+                                        w("raw", raw_loss_input);
+                                        w("gt", tgt);
+                                        w("weight", wmap);
+                                        w("ycorr", loss_corrected);
+                                        w("ygt", loss_gt);
+                                        w("yraw", loss_raw);
+                                        w("grad_y", gy);
+                                        w("grad_rgb", ycc_grad_rgb_);
+                                        float hs[4] = {}, hl = 0.0f, ht = 0.0f;
+                                        cudaMemcpyAsync(hs, sc, sizeof(hs), cudaMemcpyDeviceToHost, ycc_stream);
+                                        cudaMemcpyAsync(&hl, ycc_luma_loss_.ptr<float>(), sizeof(float), cudaMemcpyDeviceToHost, ycc_stream);
+                                        cudaMemcpyAsync(&ht, ycc_total_.ptr<float>(), sizeof(float), cudaMemcpyDeviceToHost, ycc_stream);
+                                        cudaStreamSynchronize(ycc_stream);
+                                        std::ofstream info(dd / std::format("info_{}.txt", iter));
+                                        info << std::format("camera {}\nH {}\nW {}\ntarget_u8 {}\nweight_kind {}\nborder {}\nlambda_dssim {:.9g}\n"
+                                                            "luma_scale_K {:.9g}\nluma_lambda {:.9g}\nchroma_scale {:.9g}\nluma_loss {:.9g}\n"
+                                                            "chroma_abs_sum {:.9g}\nchroma_weight_sum {:.9g}\nchroma_loss {:.9g}\nchroma_coef {:.9g}\n"
+                                                            "total {:.9g}\nraw_valid {}\n",
+                                                            cam->image_name(), H, W, tu8 ? 1 : 0, wkind, border, step_params.lambda_dssim,
+                                                            ycc_scale_, ycc_lambda_, ycc_chroma_scale_, hl, hs[0], hs[1], hs[2], hs[3], ht,
+                                                            loss_raw.is_valid() && loss_raw.numel() > 0 ? 1 : 0);
+                                        LOG_INFO("ycc dump: iteration {} camera {} -> {}", iter, cam->image_name(), lfs::core::path_to_utf8(dd));
+                                    }
+                                }
                             }
                             if (!generated_view)
                                 note_real_view_loss(tile_loss); // no-op without --generated-prefix
@@ -8668,7 +8859,29 @@ namespace lfs::training {
                             }
                         }
 
-                        if (tile_raw_gradient) {
+                        if (tile_raw_gradient && ycc_loss_) {
+                            // --loss-ycc: the raw-image (contrast / structure) gradient is in Y: accumulate it there, then x K
+                            // through the luma weights into dL/d(composite)
+                            const size_t HW = tile_raw_gradient->raw_img.numel();
+                            const cudaStream_t ycc_bstream = lfs::core::getCurrentCUDAStream();
+                            if (!ycc_grad_y_raw_.is_valid() || ycc_grad_y_raw_.numel() != HW)
+                                ycc_grad_y_raw_ = lfs::core::Tensor::empty({HW}, lfs::core::Device::CUDA, lfs::core::DataType::Float32);
+                            ycc_grad_y_raw_.set_stream(ycc_bstream);
+                            ycc_grad_y_raw_.zero_();
+                            lfs::training::kernels::accumulate_decoupled_raw_gradient(*tile_raw_gradient, ycc_grad_y_raw_);
+                            LFS_ASSERT_MSG(raster_grad.is_contiguous() && raster_grad.numel() == 3 * HW, "--loss-ycc: raster gradient size");
+                            ycc_grad_y_raw_.sync_to_stream(ycc_bstream);
+                            raster_grad.sync_to_stream(ycc_bstream);
+                            lfs::training::kernels::ycc_luma_grad_to_rgb(ycc_grad_y_raw_.ptr<float>(), ycc_scale_, static_cast<int>(HW),
+                                                                         raster_grad.ptr<float>(), true, ycc_bstream);
+                            if (const char* yd = std::getenv("LFS_YCC_DUMP"); yd != nullptr && *yd &&
+                                std::filesystem::exists(params_.dataset.output_path / "ycc_dump" / std::format("info_{}.txt", iter))) {
+                                std::string err;
+                                if (!BackgroundCubemap::write_tensor_npy(params_.dataset.output_path / "ycc_dump" / std::format("grad_yraw_{}.npy", iter),
+                                                                         ycc_grad_y_raw_, err, ycc_bstream))
+                                    LOG_ERROR("ycc dump: {}", err);
+                            }
+                        } else if (tile_raw_gradient) {
                             lfs::training::kernels::accumulate_decoupled_raw_gradient(*tile_raw_gradient, raster_grad);
                         }
                         if (tile_raw_residual) {

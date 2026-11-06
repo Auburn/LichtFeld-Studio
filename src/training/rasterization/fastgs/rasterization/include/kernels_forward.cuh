@@ -153,7 +153,7 @@ namespace fast_lfs::rasterization::kernels::forward {
         // load opacity
         const float raw_opacity = raw_opacities[primitive_idx];
         const float opacity = 1.0f / (1.0f + expf(-raw_opacity));
-        if (opacity < config::min_alpha_threshold)
+        if (opacity < c_splat_cutoff.min_alpha)
             active = false;
 
         // compute 3d covariance from raw scale and rotation
@@ -264,13 +264,13 @@ namespace fast_lfs::rasterization::kernels::forward {
             active = false;
         const float det_rcp = 1.0f / det;
         const float output_opacity = mip_filter ? opacity * sqrtf(det_raw * det_rcp) : opacity;
-        if (output_opacity < config::min_alpha_threshold)
+        if (output_opacity < c_splat_cutoff.min_alpha)
             active = false;
 
         const float3 conic = make_float3(cov2d.z * det_rcp, -cov2d.y * det_rcp, cov2d.x * det_rcp);
 
         // Compute bounds
-        const float power_threshold = logf(output_opacity * config::min_alpha_threshold_rcp);
+        const float power_threshold = splat_power_threshold(output_opacity); // --max-std-dev: min(cut, alpha contour)
         const float power_threshold_factor = sqrtf(2.0f * power_threshold);
         float extent_x = fmaxf(power_threshold_factor * sqrtf(cov2d.x) - 0.5f, 0.0f);
         float extent_y = fmaxf(power_threshold_factor * sqrtf(cov2d.z) - 0.5f, 0.0f);
@@ -553,9 +553,9 @@ namespace fast_lfs::rasterization::kernels::forward {
             write_offset_end_raw > max_instances ? max_instances : write_offset_end_raw;
 
         const float2 mean2d_shifted = active ? primitive_mean2d[work_idx].mean2d - 0.5f : make_float2(0.0f, 0.0f);
-        const float4 conic_opacity_loaded = active ? primitive_conic_opacity[work_idx] : make_float4(0.0f, 0.0f, 0.0f, config::min_alpha_threshold);
+        const float4 conic_opacity_loaded = active ? primitive_conic_opacity[work_idx] : make_float4(0.0f, 0.0f, 0.0f, c_splat_cutoff.min_alpha);
         const float3 conic = make_float3(conic_opacity_loaded);
-        const float power_threshold_precomputed = logf(conic_opacity_loaded.w * config::min_alpha_threshold_rcp);
+        const float power_threshold_precomputed = splat_power_threshold(conic_opacity_loaded.w);
         const float radius_sq = 2.0f * power_threshold_precomputed;
 
         uint current_write_offset = work_idx == 0 ? 0 : static_cast<uint>(primitive_offsets[work_idx - 1]);
@@ -802,7 +802,7 @@ namespace fast_lfs::rasterization::kernels::forward {
                     // alpha=1/255 contour. Dead .w slot; pairs that pass still run the
                     // exact opacity*exp test.
                     collected_color[thread_rank] = make_float4(
-                        clamped, logf(conic_opacity.w * config::min_alpha_threshold_rcp));
+                        clamped, splat_power_threshold(conic_opacity.w));
                     collected_depth[thread_rank] = primitive_depths[work_idx];
                     if constexpr (kRenderNormal) {
                         collected_normal[thread_rank] = primitive_normals[work_idx];
@@ -885,7 +885,7 @@ namespace fast_lfs::rasterization::kernels::forward {
                             // __expf: -6.7% blend kernel time vs expf at equal 30k PSNR/SSIM (bonsai A/B).
                             const float gaussian = __expf(-sigma_over_2);
                             const float alpha = fminf(opacity * gaussian, config::max_fragment_alpha);
-                            if (!(alpha < config::min_alpha_threshold)) {
+                            if (!(alpha < c_splat_cutoff.min_alpha) && !(sigma_over_2 > c_splat_cutoff.half_z2_max)) {
                                 const float weight = transmittance0 * alpha;
                                 color_pixel0 += weight * make_float3(c);
                                 depth_pixel0 += weight * depth;
@@ -917,7 +917,7 @@ namespace fast_lfs::rasterization::kernels::forward {
                         if (!(sigma_over_2 < 0.0f) && !(sigma_over_2 > log_alpha_pt + kLogAlphaGateEps)) {
                             const float gaussian = __expf(-sigma_over_2);
                             const float alpha = fminf(opacity * gaussian, config::max_fragment_alpha);
-                            if (!(alpha < config::min_alpha_threshold)) {
+                            if (!(alpha < c_splat_cutoff.min_alpha) && !(sigma_over_2 > c_splat_cutoff.half_z2_max)) {
                                 const float weight = transmittance1 * alpha;
                                 color_pixel1 += weight * make_float3(c);
                                 depth_pixel1 += weight * depth;

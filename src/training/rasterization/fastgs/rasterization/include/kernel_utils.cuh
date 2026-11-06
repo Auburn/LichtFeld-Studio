@@ -11,6 +11,7 @@
 #include "lfs/training/joint_adam_codec.cuh"
 #include "lfs/training/screen_share.cuh"
 #include "rasterization_config.h"
+#include "splat_cutoff.cuh"
 #include "utils.h"
 
 #include <cuda_fp16.h>
@@ -1280,9 +1281,9 @@ namespace fast_lfs::rasterization::kernels {
         const float sub_y0,
         const float sub_w,
         const float sub_h) {
-        if (!(opacity >= config::min_alpha_threshold))
+        if (!(opacity >= c_splat_cutoff.min_alpha))
             return false;
-        const float power_threshold = logf(opacity * config::min_alpha_threshold_rcp);
+        const float power_threshold = splat_power_threshold(opacity); // --max-std-dev: capped by the cut
         // Continuous box of pixel centers in mean-relative coordinates.
         const float x0 = (sub_x0 + 0.5f) - mean2d.x;
         const float x1 = (sub_x0 + sub_w - 0.5f) - mean2d.x;

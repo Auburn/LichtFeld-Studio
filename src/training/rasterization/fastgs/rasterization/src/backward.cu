@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "backward.h"
+#include "splat_cutoff.cuh"
+#include <string>
 #include "buffer_utils.h"
 #include "forward.h"
 #include "helper_math.h"
@@ -309,3 +311,11 @@ void fast_lfs::rasterization::backward(
         sync_fastgs_phase_if_requested("preprocess_backward", fastgs_status, "preprocess_backward", static_cast<uint64_t>(n_primitives), n_tiles_u64);
     }
 }
+
+// --max-std-dev (LFQPLCY): this unit's copy of the splat cut (set_splat_cutoff in forward.cu)
+namespace fast_lfs::rasterization {
+    void upload_splat_cutoff_backward_unit(const SplatCutoffParams& p) {
+        if (const cudaError_t e = upload_splat_cutoff_this_unit(p); e != cudaSuccess)
+            throw std::runtime_error(std::string("set_splat_cutoff (backward): ") + cudaGetErrorString(e));
+    }
+} // namespace fast_lfs::rasterization

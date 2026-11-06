@@ -1273,8 +1273,8 @@ namespace fast_lfs::rasterization::kernels::backward {
                         const float gaussian = __expf(-sigma_over_2);
                         const float unclamped_alpha = compensated_opacity * gaussian;
                         const float alpha = fminf(unclamped_alpha, config::max_fragment_alpha);
-                        if (!(alpha >= config::min_alpha_threshold))
-                            return;
+                        if (!(alpha >= c_splat_cutoff.min_alpha) || sigma_over_2 > c_splat_cutoff.half_z2_max)
+                            return; // --max-std-dev: the same cut as the forward
                         has_contribution = true;
                         const bool alpha_saturated = unclamped_alpha >= config::max_fragment_alpha;
                         const float one_minus_alpha = 1.0f - alpha;

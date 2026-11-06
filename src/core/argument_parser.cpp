@@ -88,6 +88,10 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--rs-learn-start", "rs_learn_start", Integer},
             OptimizationCliBinding{"--rs-motion-start", "rs_motion_start", Integer},
             OptimizationCliBinding{"--pose-opt", "pose_opt", Bool},
+            OptimizationCliBinding{"--loss-ycc", "loss_ycc", Bool},
+            OptimizationCliBinding{"--loss-ycc-chroma-weight", "loss_ycc_chroma_weight", Float},
+            OptimizationCliBinding{"--loss-ycc-luma-scale", "loss_ycc_luma_scale", Float},
+            OptimizationCliBinding{"--max-std-dev", "max_std_dev", Float},
             OptimizationCliBinding{"--pose-lr-deg", "pose_lr_deg", Float},
             OptimizationCliBinding{"--pose-lr-units", "pose_lr_units", Float},
             OptimizationCliBinding{"--pose-opt-start", "pose_opt_start", Integer},
@@ -884,6 +888,10 @@ namespace {
             ::args::ValueFlag<int> rs_learn_start(training_group, "iter", lfs::core::args::optimization_cli_help("--rs-learn-start"), {"rs-learn-start"});
             ::args::ValueFlag<int> rs_motion_start(training_group, "iter", lfs::core::args::optimization_cli_help("--rs-motion-start"), {"rs-motion-start"});
             ::args::Flag pose_opt(training_group, "enabled", lfs::core::args::optimization_cli_help("--pose-opt"), {"pose-opt"});
+            ::args::Flag loss_ycc(training_group, "enabled", lfs::core::args::optimization_cli_help("--loss-ycc"), {"loss-ycc"});
+            ::args::ValueFlag<float> loss_ycc_chroma_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--loss-ycc-chroma-weight"), {"loss-ycc-chroma-weight"});
+            ::args::ValueFlag<float> loss_ycc_luma_scale(training_group, "scale", lfs::core::args::optimization_cli_help("--loss-ycc-luma-scale"), {"loss-ycc-luma-scale"});
+            ::args::ValueFlag<float> max_std_dev(training_group, "sigmas", lfs::core::args::optimization_cli_help("--max-std-dev"), {"max-std-dev"});
             ::args::ValueFlag<float> pose_lr_deg(training_group, "deg", lfs::core::args::optimization_cli_help("--pose-lr-deg"), {"pose-lr-deg"});
             ::args::ValueFlag<float> pose_lr_units(training_group, "units", lfs::core::args::optimization_cli_help("--pose-lr-units"), {"pose-lr-units"});
             ::args::ValueFlag<int> pose_opt_start(training_group, "iter", lfs::core::args::optimization_cli_help("--pose-opt-start"), {"pose-opt-start"});
@@ -1720,6 +1728,10 @@ namespace {
                                         rs_learn_start_val = cli_option_present({"--rs-learn-start"}) ? std::optional<int>(::args::get(rs_learn_start)) : std::optional<int>(),
                                         rs_motion_start_val = cli_option_present({"--rs-motion-start"}) ? std::optional<int>(::args::get(rs_motion_start)) : std::optional<int>(),
                                         pose_opt_flag = bool(pose_opt),
+                                        loss_ycc_flag = bool(loss_ycc),
+                                        loss_ycc_chroma_weight_val = cli_option_present({"--loss-ycc-chroma-weight"}) ? std::optional<float>(::args::get(loss_ycc_chroma_weight)) : std::optional<float>(),
+                                        loss_ycc_luma_scale_val = cli_option_present({"--loss-ycc-luma-scale"}) ? std::optional<float>(::args::get(loss_ycc_luma_scale)) : std::optional<float>(),
+                                        max_std_dev_val = cli_option_present({"--max-std-dev"}) ? std::optional<float>(::args::get(max_std_dev)) : std::optional<float>(),
                                         pose_lr_deg_val = cli_option_present({"--pose-lr-deg"}) ? std::optional<float>(::args::get(pose_lr_deg)) : std::optional<float>(),
                                         pose_lr_units_val = cli_option_present({"--pose-lr-units"}) ? std::optional<float>(::args::get(pose_lr_units)) : std::optional<float>(),
                                         pose_opt_start_val = cli_option_present({"--pose-opt-start"}) ? std::optional<int>(::args::get(pose_opt_start)) : std::optional<int>(),
@@ -1950,6 +1962,11 @@ namespace {
                     opt.rs_motion_start = static_cast<size_t>(*rs_motion_start_val);
                 if (pose_opt_flag)
                     opt.pose_opt = true;
+                if (loss_ycc_flag)
+                    opt.loss_ycc = true;
+                setVal(loss_ycc_chroma_weight_val, opt.loss_ycc_chroma_weight);
+                setVal(loss_ycc_luma_scale_val, opt.loss_ycc_luma_scale);
+                setVal(max_std_dev_val, opt.max_std_dev);
                 setVal(pose_lr_deg_val, opt.pose_lr_deg);
                 setVal(pose_lr_units_val, opt.pose_lr_units);
                 if (pose_opt_start_val)
@@ -2161,6 +2178,10 @@ namespace {
                 note_opt("rs_learn_start", rs_learn_start_val.has_value());
                 note_opt("rs_motion_start", rs_motion_start_val.has_value());
                 note_opt("pose_opt", pose_opt_flag);
+                note_opt("loss_ycc", loss_ycc_flag);
+                note_opt("loss_ycc_chroma_weight", loss_ycc_chroma_weight_val.has_value());
+                note_opt("loss_ycc_luma_scale", loss_ycc_luma_scale_val.has_value());
+                note_opt("max_std_dev", max_std_dev_val.has_value());
                 note_opt("pose_lr_deg", pose_lr_deg_val.has_value());
                 note_opt("pose_lr_units", pose_lr_units_val.has_value());
                 note_opt("pose_opt_start", pose_opt_start_val.has_value());

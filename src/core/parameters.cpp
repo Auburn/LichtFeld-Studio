@@ -934,6 +934,22 @@ namespace lfs::core {
                 !std::isfinite(pose_opt_half_life) || pose_opt_half_life < 0.0f || !std::isfinite(pose_prior) || pose_prior < 0.0f ||
                 !std::isfinite(pose_smooth) || pose_smooth < 0.0f)
                 return "pose_lr_deg, pose_lr_units, pose_opt_half_life, pose_prior and pose_smooth must be finite and nonnegative";
+            if (!std::isfinite(loss_ycc_chroma_weight) || loss_ycc_chroma_weight < 0.0f || !std::isfinite(loss_ycc_luma_scale) ||
+                loss_ycc_luma_scale <= 0.0f)
+                return "loss_ycc_chroma_weight must be finite and >= 0, loss_ycc_luma_scale finite and > 0";
+            if (!std::isfinite(max_std_dev) || max_std_dev < 0.0f || (max_std_dev > 0.0f && max_std_dev < 0.5f) || max_std_dev > 10.0f)
+                return std::format("max_std_dev must be 0 (off) or within [0.5, 10] (got {})", max_std_dev);
+            if (max_std_dev > 0.0f && gut)
+                return "--max-std-dev applies to the standard rasterizer (not --gut)";
+            if (max_std_dev > 0.0f && mip_filter)
+                return "--max-std-dev reproduces the game's cut, which has no mip filter: drop --enable-mip";
+            if (loss_ycc && gradient_loss_weight > 0.0f && !use_ppisp && !use_exposure_correction && !use_bilateral_grid)
+                return "--loss-ycc with the gradient loss (--gradient-loss-weight > 0; MRNF's default is 1.8) needs an appearance "
+                       "model (--ppisp, exposure correction or --bilateral-grid): its R'G'B' term is applied to the raw composite";
+            if (loss_ycc && !generated_prefix.empty())
+                return "--loss-ycc cannot be combined with --generated-prefix (the generated-view loss is RGB only)";
+            if (loss_ycc && ppisp_use_controller)
+                return "--loss-ycc cannot be combined with the PPISP controller (its loss phase is RGB only)";
             if (pose_opt_start > MAX_ITERATION_VALUE || pose_opt_hold > MAX_ITERATION_VALUE)
                 return std::format("pose_opt_start and pose_opt_hold must be within [0, {}]", MAX_ITERATION_VALUE);
             if (growth_visit_stat != "mean" && growth_visit_stat != "weighted")

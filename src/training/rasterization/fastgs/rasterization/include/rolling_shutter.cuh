@@ -88,12 +88,59 @@ namespace fast_lfs::rasterization::kernels::rolling_shutter {
         return true;
     }
 
+    // splat_rows with every pose at s tau + rs.time_offset (--motion-blur's sub-exposure reference renders; checks only).
+    template <bool FISHEYE, bool RADIAL = false>
+    __device__ __noinline__ float splat_rows_offset(const FastGSRollingShutter& rs, const Motion& m, const FastGSLens& lens,
+                                                    const float fy, const float cy, const float render_height,
+                                                    const float3 mean, float4 rows[3], const uint primitive_idx) {
+        const float3 pm = make_float3(
+            rows[0].x * mean.x + rows[0].y * mean.y + rows[0].z * mean.z + rows[0].w,
+            rows[1].x * mean.x + rows[1].y * mean.y + rows[1].z * mean.z + rows[1].w,
+            rows[2].x * mean.x + rows[2].y * mean.y + rows[2].z * mean.z + rows[2].w);
+        float s = 0.0f;
+        if (rs.times != nullptr && rs.times_fixed != 0) {
+            s = rs.times[primitive_idx];
+        } else {
+            const float H = rs.sensor_height > 0.0f ? rs.sensor_height : render_height;
+            float3 p = pm;
+            for (int k = 0; k < rs.iters; ++k) {
+                float v;
+                if (!row_of<FISHEYE, RADIAL>(lens, fy, cy, p, v))
+                    break;
+                s = fminf(fmaxf((v + rs.row_offset) / H - 0.5f, -0.5f), 0.5f);
+                if (k + 1 < rs.iters) {
+                    float3 E[3], d;
+                    pose_at(m, s * m.tau + rs.time_offset, E, d);
+                    p = rotate(E, pm - d);
+                }
+            }
+        }
+        float3 E[3], d;
+        pose_at(m, s * m.tau + rs.time_offset, E, d);
+        const float3 b = make_float3(rows[0].w - d.x, rows[1].w - d.y, rows[2].w - d.z);
+        const float4 r0 = rows[0], r1 = rows[1], r2 = rows[2];
+#pragma unroll
+        for (int i = 0; i < 3; ++i) {
+            const float3 e = E[i];
+            rows[i] = make_float4(
+                e.x * r0.x + e.y * r1.x + e.z * r2.x,
+                e.x * r0.y + e.y * r1.y + e.z * r2.y,
+                e.x * r0.z + e.y * r1.z + e.z * r2.z,
+                e.x * b.x + e.y * b.y + e.z * b.z);
+        }
+        return s;
+    }
+
     // Solves the splat's capture time and replaces rows (in: the mid-readout world-to-camera rows; out: the rows at the
     // splat's time). Returns s, the row fraction (t = s tau, s in [-1/2, 1/2]).
-    template <bool FISHEYE, bool RADIAL = false>
+    template <bool FISHEYE, bool RADIAL = false, bool BLUR = false>
     __device__ __forceinline__ float splat_rows(const FastGSRollingShutter& rs, const Motion& m, const FastGSLens& lens,
                                                 const float fy, const float cy, const float render_height,
                                                 const float3 mean, float4 rows[3], const uint primitive_idx) {
+        if constexpr (BLUR) {
+            if (rs.time_offset != 0.0f)
+                return splat_rows_offset<FISHEYE, RADIAL>(rs, m, lens, fy, cy, render_height, mean, rows, primitive_idx);
+        }
         const float3 pm = make_float3(
             rows[0].x * mean.x + rows[0].y * mean.y + rows[0].z * mean.z + rows[0].w,
             rows[1].x * mean.x + rows[1].y * mean.y + rows[1].z * mean.z + rows[1].w,
@@ -194,6 +241,109 @@ namespace fast_lfs::rasterization::kernels::rolling_shutter {
         acc13[10] += h * gd.y;
         acc13[11] += h * gd.z;
         acc13[12] += s * (dot(gr, m.w + m.al * t) + dot(gd, m.v + m.a * t));
+    }
+
+    // ---------------------------------------------------------------- --motion-blur (FastGSRollingShutter::exposure)
+    // The splat's time as splat_rows drew it (t = s tau, + time_offset in sub-exposure reference renders).
+    __device__ __forceinline__ float splat_time(const FastGSRollingShutter& rs, const Motion& m, const float s) {
+        return rs.time_offset != 0.0f ? s * m.tau + rs.time_offset : s * m.tau;
+    }
+
+    // This camera's exposure Te in seconds (T x its learned scale).
+    __device__ __forceinline__ float exposure_of(const FastGSRollingShutter& rs) {
+        const float T = __ldg(rs.exposure);
+        return rs.exposure_scale != nullptr ? T * __ldg(rs.exposure_scale) : T;
+    }
+
+    // The centre in the mid-readout camera: pm = W x + b (mid rows).
+    __device__ __forceinline__ float3 mid_point(const float4* mid, const float3 x) {
+        const float4 r0 = mid[0], r1 = mid[1], r2 = mid[2];
+        return make_float3(r0.x * x.x + r0.y * x.y + r0.z * x.z + r0.w,
+                           r1.x * x.x + r1.y * x.y + r1.z * x.z + r1.w,
+                           r2.x * x.x + r2.y * x.y + r2.z * x.z + r2.w);
+    }
+
+    // The chord of the camera-space centre over the exposure, dp = p(t + Te/2) - p(t - Te/2), p(t') = E(t') (pm - d(t'))
+    // (the rolling shutter's pose: rotation omega t + alpha t^2/2 and travel vel t + acc t^2/2, mid-readout camera axes).
+    __device__ __forceinline__ float3 blur_chord(const Motion& m, const float t, const float Te, const float3 pm) {
+        float3 Ep[3], Em[3], dp, dm;
+        pose_at(m, t + 0.5f * Te, Ep, dp);
+        pose_at(m, t - 0.5f * Te, Em, dm);
+        return rotate(Ep, pm - dp) - rotate(Em, pm - dm);
+    }
+
+    // dL/dx (world centre) of the chord: dp = (E+ - E-) W x + ..., so W^T (E+^T - E-^T) g.
+    __device__ __forceinline__ float3 blur_mean_grad(const Motion& m, const float t, const float Te, const float4* mid,
+                                                     const float3 g) {
+        float3 Ep[3], Em[3], dp, dm;
+        pose_at(m, t + 0.5f * Te, Ep, dp);
+        pose_at(m, t - 0.5f * Te, Em, dm);
+        const float3 gc = (Ep[0] - Em[0]) * g.x + (Ep[1] - Em[1]) * g.y + (Ep[2] - Em[2]) * g.z; // (E+ - E-)^T g
+        const float4 r0 = mid[0], r1 = mid[1], r2 = mid[2];
+        return make_float3(r0.x * gc.x + r1.x * gc.y + r2.x * gc.z,
+                           r0.y * gc.x + r1.y * gc.y + r2.y * gc.z,
+                           r0.z * gc.x + r1.z * gc.y + r2.z * gc.z);
+    }
+
+    // motion_grad at an explicit time t (rows W' = E(t) W, b' = E(t) (b - d(t))) with dt/dtau = dtdtau; returns dL/dt.
+    __device__ __forceinline__ float motion_grad_at(const Motion& m, const float t, const float dtdtau, const float4 mid[3],
+                                                    const float3 GW[3], const float3 Gb, float acc13[13]) {
+        float3 E[3], d;
+        pose_at(m, t, E, d);
+        const float3 u = make_float3(mid[0].w - d.x, mid[1].w - d.y, mid[2].w - d.z);
+        const float3 W0 = make_float3(mid[0].x, mid[0].y, mid[0].z);
+        const float3 W1 = make_float3(mid[1].x, mid[1].y, mid[1].z);
+        const float3 W2 = make_float3(mid[2].x, mid[2].y, mid[2].z);
+        const float Gbv[3] = {Gb.x, Gb.y, Gb.z};
+        float GE[3][3];
+#pragma unroll
+        for (int i = 0; i < 3; ++i) {
+            GE[i][0] = dot(GW[i], W0) + Gbv[i] * u.x;
+            GE[i][1] = dot(GW[i], W1) + Gbv[i] * u.y;
+            GE[i][2] = dot(GW[i], W2) + Gbv[i] * u.z;
+        }
+        float M[3][3];
+#pragma unroll
+        for (int i = 0; i < 3; ++i)
+#pragma unroll
+            for (int j = 0; j < 3; ++j)
+                M[i][j] = GE[i][0] * E[j].x + GE[i][1] * E[j].y + GE[i][2] * E[j].z;
+        const float3 g = make_float3(M[2][1] - M[1][2], M[0][2] - M[2][0], M[1][0] - M[0][1]);
+        const float h = 0.5f * t * t;
+        const float3 r = m.w * t + m.al * h;
+        const float3 phi = make_float3(-r.x, -r.y, -r.z);
+        const float th2 = dot(phi, phi);
+        float ca, cb;
+        if (th2 < 1e-6f) {
+            ca = 0.5f - th2 * (1.0f / 24.0f);
+            cb = (1.0f / 6.0f) - th2 * (1.0f / 120.0f);
+        } else {
+            const float th = sqrtf(th2);
+            ca = (1.0f - cosf(th)) / th2;
+            cb = (th - sinf(th)) / (th2 * th);
+        }
+        const float3 pg = cross(phi, g);
+        const float3 gphi = g - ca * pg + cb * cross(phi, pg);
+        const float3 gr = make_float3(-gphi.x, -gphi.y, -gphi.z);
+        const float3 gd = make_float3(
+            -(E[0].x * Gb.x + E[1].x * Gb.y + E[2].x * Gb.z),
+            -(E[0].y * Gb.x + E[1].y * Gb.y + E[2].y * Gb.z),
+            -(E[0].z * Gb.x + E[1].z * Gb.y + E[2].z * Gb.z));
+        acc13[0] += t * gr.x;
+        acc13[1] += t * gr.y;
+        acc13[2] += t * gr.z;
+        acc13[3] += h * gr.x;
+        acc13[4] += h * gr.y;
+        acc13[5] += h * gr.z;
+        acc13[6] += t * gd.x;
+        acc13[7] += t * gd.y;
+        acc13[8] += t * gd.z;
+        acc13[9] += h * gd.x;
+        acc13[10] += h * gd.y;
+        acc13[11] += h * gd.z;
+        const float dLdt = dot(gr, m.w + m.al * t) + dot(gd, m.v + m.a * t);
+        acc13[12] += dtdtau * dLdt;
+        return dLdt;
     }
 
     // Block-wide sum of 13 values per thread, added atomically to out[13] (one atomic per value per block). Every thread of

@@ -192,6 +192,49 @@ namespace lfs::training {
                                                      ? std::format(", motion from {}", settings.motion_start)
                                                      : std::string{}),
                                           settings.lr, settings.readout_lr_ms, settings.prior, settings.smooth));
+        // --motion-blur
+        if (!(settings.exposure_ms >= 0.0f && settings.exposure_ms <= 50.0f))
+            return std::unexpected(std::format("--exposure-ms must be within [0, 50] (got {})", settings.exposure_ms));
+        const float ems10 = settings.exposure_ms * 10.0f;
+        const std::string ems = std::fabs(ems10 - std::round(ems10)) < 1e-3f ? std::format("{:.1f}", settings.exposure_ms)
+                                                                            : std::format("{:.3f}", settings.exposure_ms);
+        if (settings.motion_blur && settings.exposure_ms <= 0.0f) {
+            rs->blur_description_ = "Motion blur (--motion-blur): exposure 0.0 ms: off (the unchanged kernels)";
+        } else if (settings.motion_blur) {
+            const std::vector<float> e = {settings.exposure_ms * 1e-3f};
+            rs->exposure_ = device_alloc<float>(1, &e);
+            if (settings.learn_exposure) {
+                const std::vector<float> ones(N, 1.0f), zeros3(N * 3, 0.0f);
+                rs->exp_scale_ = device_alloc<float>(N, &ones);
+                rs->exp_state_ = device_alloc<float>(N * 3, &zeros3);
+                rs->exp_grad_ = device_alloc<float>(1);
+            }
+            if (!rs->exposure_ || (settings.learn_exposure && (!rs->exp_scale_ || !rs->exp_state_ || !rs->exp_grad_)))
+                return std::unexpected("--motion-blur: device allocation failed");
+            // the smear at the image centre over the exposure: rotation (|omega_xy| T fx) and lateral travel at 1 unit
+            const float T = settings.exposure_ms * 1e-3f;
+            std::vector<float> rot(N), trav(N);
+            for (size_t i = 0; i < N; ++i) {
+                const float* v = init.data() + i * 12;
+                rot[i] = std::sqrt(v[0] * v[0] + v[1] * v[1]) * T * fx;
+                trav[i] = std::sqrt(v[6] * v[6] + v[7] * v[7]) * T * fx;
+            }
+            auto pct = [](std::vector<float> x, double q) {
+                const size_t k = std::min(x.size() - 1, static_cast<size_t>(q * static_cast<double>(x.size())));
+                std::nth_element(x.begin(), x.begin() + k, x.end());
+                return x[k];
+            };
+            rs->blur_description_ = std::format(
+                "Motion blur (--motion-blur): exposure {} ms, method screen-space (each splat's 2D covariance + dmu dmu^T / 12 along "
+                "its exposure smear dmu = J (p(t + T/2) - p(t - T/2)), rotation and travel at the splat; opacity x sqrt(det S0 / "
+                "det S_b), coverage kept), {} of {} training cameras; image-centre smear from rotation median {:.2f} / p90 {:.2f} / "
+                "max {:.2f} px, from lateral travel at 1 unit median {:.2f} / p90 {:.2f} / max {:.2f} px; exposure {}",
+                ems, N, cameras.size(), pct(rot, 0.5), pct(rot, 0.9), pct(rot, 1.0), pct(trav, 0.5),
+                pct(trav, 0.9), pct(trav, 1.0),
+                settings.learn_exposure ? std::format("scale learned per camera from iteration {} (lr {}, clamp [0.5, 2])",
+                                                      settings.learn_start, settings.exposure_lr)
+                                        : std::string("fixed"));
+        }
         (void)fisheye;
         return rs;
     }
@@ -199,7 +242,9 @@ namespace lfs::training {
     RollingShutterMotion::~RollingShutterMotion() {
         for (void* p : {static_cast<void*>(motion_), static_cast<void*>(init_), static_cast<void*>(adam_m_), static_cast<void*>(adam_v_),
                         static_cast<void*>(steps_), static_cast<void*>(readout_), static_cast<void*>(readout_state_),
-                        static_cast<void*>(grad_), static_cast<void*>(nb_)})
+                        static_cast<void*>(grad_), static_cast<void*>(nb_),
+                        static_cast<void*>(exposure_), static_cast<void*>(exp_scale_), static_cast<void*>(exp_state_),
+                        static_cast<void*>(exp_grad_)})
             if (p)
                 cudaFree(p);
     }
@@ -222,7 +267,58 @@ namespace lfs::training {
             cudaMemsetAsync(grad_, 0, sizeof(float) * 13, stream);
             rs.grad = grad_;
         }
+        if (exposure_ != nullptr) { // --motion-blur
+            rs.exposure = exposure_;
+            if (exp_scale_ != nullptr) {
+                rs.exposure_scale = exp_scale_ + row;
+                if (exposure_learning(iter)) {
+                    cudaMemsetAsync(exp_grad_, 0, sizeof(float), stream);
+                    rs.grad_exposure = exp_grad_;
+                }
+            }
+        }
         return rs;
+    }
+
+    bool RollingShutterMotion::exposure_learning(const int iter) const {
+        return exp_scale_ != nullptr && iter >= settings_.learn_start;
+    }
+
+    std::string RollingShutterMotion::exposure_summary(cudaStream_t stream) {
+        const size_t N = names_.size();
+        std::vector<float> sc(N), st(N * 3);
+        cudaStreamSynchronize(stream);
+        cudaMemcpy(sc.data(), exp_scale_, sizeof(float) * N, cudaMemcpyDeviceToHost);
+        cudaMemcpy(st.data(), exp_state_, sizeof(float) * N * 3, cudaMemcpyDeviceToHost);
+        std::vector<float> u;
+        for (size_t i = 0; i < N; ++i)
+            if (st[i * 3 + 2] > 0.0f)
+                u.push_back(sc[i]);
+        if (u.empty())
+            return std::format("motion blur: exposure scale not updated yet (0 of {} cameras)", N);
+        std::sort(u.begin(), u.end());
+        const auto q = [&u](double f) { return u[std::min(u.size() - 1, static_cast<size_t>(f * static_cast<double>(u.size())))]; };
+        return std::format("motion blur: learned exposure scale over {} of {} cameras updated: median {:.4f}, p10 {:.4f}, p90 {:.4f}, "
+                           "min {:.4f}, max {:.4f} (exposure {} ms -> median {:.3f} ms)",
+                           u.size(), N, q(0.5), q(0.1), q(0.9), u.front(), u.back(), settings_.exposure_ms,
+                           settings_.exposure_ms * q(0.5));
+    }
+
+    bool RollingShutterMotion::save_exposure(const std::filesystem::path& file, cudaStream_t stream, std::string& error) {
+        const size_t N = names_.size();
+        std::vector<float> sc(N), st(N * 3);
+        cudaStreamSynchronize(stream);
+        cudaMemcpy(sc.data(), exp_scale_, sizeof(float) * N, cudaMemcpyDeviceToHost);
+        cudaMemcpy(st.data(), exp_state_, sizeof(float) * N * 3, cudaMemcpyDeviceToHost);
+        std::ofstream out(file);
+        if (!out) {
+            error = std::format("cannot write '{}'", lfs::core::path_to_utf8(file));
+            return false;
+        }
+        out << std::format("# --motion-blur-learn-exposure (exposure {} ms): name scale exposure_ms updates\n", settings_.exposure_ms);
+        for (size_t i = 0; i < N; ++i)
+            out << std::format("{} {:.6f} {:.6f} {}\n", names_[i], sc[i], sc[i] * settings_.exposure_ms, static_cast<int>(st[i * 3 + 2]));
+        return static_cast<bool>(out);
     }
 
     bool RollingShutterMotion::motion_learning(const int iter) const {
@@ -237,6 +333,12 @@ namespace lfs::training {
     }
 
     void RollingShutterMotion::step(const lfs::core::Camera& camera, const int iter, cudaStream_t stream) {
+        if (exposure_learning(iter)) { // --motion-blur-learn-exposure
+            const int erow = row_for(camera);
+            if (erow >= 0)
+                kernels::motion_blur_exposure_adam_step(exp_scale_, exp_state_, exp_grad_, erow, settings_.exposure_lr, 0.5f, 2.0f,
+                                                        stream);
+        }
         const bool learn_motion = motion_learning(iter), learn_readout = readout_learning(iter);
         if (!learn_motion && !learn_readout)
             return;

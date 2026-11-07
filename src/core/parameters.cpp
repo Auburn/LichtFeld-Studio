@@ -950,6 +950,18 @@ namespace lfs::core {
                 return "--loss-ycc cannot be combined with --generated-prefix (the generated-view loss is RGB only)";
             if (loss_ycc && ppisp_use_controller)
                 return "--loss-ycc cannot be combined with the PPISP controller (its loss phase is RGB only)";
+            if (!std::isfinite(exposure_ms) || exposure_ms < 0.0f || exposure_ms > 50.0f)
+                return std::format("exposure_ms must be within [0, 50] (got {})", exposure_ms);
+            if (!std::isfinite(motion_blur_exposure_lr) || motion_blur_exposure_lr <= 0.0f || motion_blur_exposure_lr > 1.0f)
+                return std::format("motion_blur_exposure_lr must be within (0, 1] (got {})", motion_blur_exposure_lr);
+            if (motion_blur && rolling_shutter.empty())
+                return "--motion-blur needs --rolling-shutter (the per-frame motion it blurs along)";
+            if (motion_blur && mip_filter)
+                return "--motion-blur cannot be combined with --enable-mip (the mip filter's opacity compensation)";
+            if (motion_blur_learn_exposure && !motion_blur)
+                return "--motion-blur-learn-exposure needs --motion-blur";
+            if (motion_blur_learn_exposure && exposure_ms <= 0.0f)
+                return "--motion-blur-learn-exposure needs --exposure-ms > 0";
             if (pose_opt_start > MAX_ITERATION_VALUE || pose_opt_hold > MAX_ITERATION_VALUE)
                 return std::format("pose_opt_start and pose_opt_hold must be within [0, {}]", MAX_ITERATION_VALUE);
             if (growth_visit_stat != "mean" && growth_visit_stat != "weighted")

@@ -32,4 +32,8 @@ namespace lfs::training::kernels {
                                                 float* readout, float* readout_state, const float* grad, const int* nb,
                                                 const RollingShutterUpdate& u, cudaStream_t stream);
 
+    // --motion-blur-learn-exposure: one Adam step of camera row's exposure scale from grad[0] = dL/d(scale) (state [N,3]:
+    // m, v, step count), clamped to [lo, hi]; a non-finite gradient skips the step.
+    LFS_CUDA_API void motion_blur_exposure_adam_step(float* scale, float* state, const float* grad, int row, float lr, float lo,
+                                                     float hi, cudaStream_t stream);
 } // namespace lfs::training::kernels

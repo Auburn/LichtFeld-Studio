@@ -3476,6 +3476,10 @@ namespace lfs::training {
                 rs_settings.smooth = params.optimization.rs_smooth;
                 rs_settings.learn_start = static_cast<int>(params.optimization.rs_learn_start);
                 rs_settings.motion_start = static_cast<int>(params.optimization.rs_motion_start);
+                rs_settings.motion_blur = params.optimization.motion_blur;
+                rs_settings.exposure_ms = params.optimization.motion_blur ? params.optimization.exposure_ms : 0.0f;
+                rs_settings.learn_exposure = params.optimization.motion_blur && params.optimization.motion_blur_learn_exposure;
+                rs_settings.exposure_lr = params.optimization.motion_blur_exposure_lr;
                 if (const char* it = std::getenv("LFS_RS_ITERS"); it != nullptr && *it)
                     rs_settings.iters = std::max(1, std::atoi(it));
                 auto created = RollingShutterMotion::create(rs_settings, train_dataset_->get_cameras());
@@ -3483,6 +3487,8 @@ namespace lfs::training {
                     return std::unexpected(created.error());
                 rolling_shutter_ = std::move(*created);
                 LOG_INFO("{}", rolling_shutter_->description());
+                if (!rolling_shutter_->blur_description().empty())
+                    LOG_INFO("{}", rolling_shutter_->blur_description());
             }
 
             // Per-camera pose refinement (--pose-opt; native fisheye standard rasterizer only, with or without the RS)
@@ -9132,6 +9138,16 @@ namespace lfs::training {
                         std::string rs_error;
                         if (!rolling_shutter_->save(params_.dataset.output_path / "rs_motion_learned.txt", rs_stream, rs_error))
                             LOG_ERROR("rolling shutter: {}", rs_error);
+                    }
+                    if (rolling_shutter_ && rolling_shutter_->exposure_learned() &&
+                        (iter % 1000 == 0 || iter >= get_total_iterations())) {
+                        // --motion-blur-learn-exposure: synchronous readback at this cadence only
+                        const cudaStream_t mb_stream = lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()
+                                                                                         : strategy_->get_model().means().stream();
+                        LOG_INFO("iter {}: {}", iter, rolling_shutter_->exposure_summary(mb_stream));
+                        std::string mb_error;
+                        if (!rolling_shutter_->save_exposure(params_.dataset.output_path / "motion_blur_exposure.txt", mb_stream, mb_error))
+                            LOG_ERROR("motion blur: {}", mb_error);
                     }
                     if (pose_refinement_) {
                         const cudaStream_t pose_stream = lfs::core::getCurrentCUDAStream() ? lfs::core::getCurrentCUDAStream()

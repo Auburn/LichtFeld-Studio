@@ -66,4 +66,30 @@ namespace lfs::training::kernels {
         LFS_CUDA_LAUNCH_CHECK(stream, "training.rolling_shutter.adam");
     }
 
+    namespace {
+        __global__ void motion_blur_exposure_adam_kernel(float* scale, float* state, const float* grad, const int row, const float lr,
+                                                         const float lo, const float hi) {
+            const float g = grad[0];
+            if (!isfinite(g))
+                return;
+            float* st = state + 3 * row;
+            const float step = st[2] + 1.0f;
+            st[2] = step;
+            const float m = 0.9f * st[0] + 0.1f * g;
+            const float v = 0.999f * st[1] + 0.001f * g * g;
+            st[0] = m;
+            st[1] = v;
+            const float mh = m / (1.0f - powf(0.9f, step));
+            const float vh = v / (1.0f - powf(0.999f, step));
+            scale[row] = fminf(fmaxf(scale[row] - lr * mh / (sqrtf(vh) + 1e-10f), lo), hi);
+        }
+    } // namespace
+
+    void motion_blur_exposure_adam_step(float* scale, float* state, const float* grad, const int row, const float lr, const float lo,
+                                        const float hi, cudaStream_t stream) {
+        stream = resolve_stream(stream);
+        motion_blur_exposure_adam_kernel<<<1, 1, 0, stream>>>(scale, state, grad, row, lr, lo, hi);
+        LFS_CUDA_LAUNCH_CHECK(stream, "training.motion_blur.exposure_adam");
+    }
+
 } // namespace lfs::training::kernels

@@ -259,11 +259,16 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
                                  float* screen_share,
                                  const FastGSDistortion& preprocess_distortion) {
         // --lens-radial (LFRL): the radial lens table is its own instantiation (RADIAL = true); the others are unchanged
+        // --motion-blur (LFQPLCYM): the rolling shutter with the exposure (or a sub-exposure time offset) is its own
+        // instantiation (BLUR = true); without them the kernels are D:/lfrqplcy's
+        const bool blur = rs.motion != nullptr && (rs.exposure != nullptr || rs.time_offset != 0.0f);
         auto* const preprocess_kernel = lens.model == kLensFisheye
                                             ? (lens.radial.seg != nullptr
-                                                   ? (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true, true>
+                                                   ? (rs.motion != nullptr ? (blur ? kernels::forward::preprocess_cu<true, true, true, true>
+                                                                                   : kernels::forward::preprocess_cu<true, true, true>)
                                                                            : kernels::forward::preprocess_cu<true, false, true>)
-                                                   : (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true>
+                                                   : (rs.motion != nullptr ? (blur ? kernels::forward::preprocess_cu<true, true, false, true>
+                                                                                   : kernels::forward::preprocess_cu<true, true>)
                                                                            : kernels::forward::preprocess_cu<true, false>))
                                             : kernels::forward::preprocess_cu<false, false>;
         preprocess_kernel<<<div_round_up(n_work_items, static_cast<uint>(config::block_size_preprocess)), config::block_size_preprocess, 0, stream>>>(

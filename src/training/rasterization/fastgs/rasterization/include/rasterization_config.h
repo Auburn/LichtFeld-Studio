@@ -110,6 +110,17 @@ namespace fast_lfs::rasterization {
         int iters = 2;                  // fixed-point re-projections (>= 1)
         float row_offset = 0.0f;        // sensor rows above this render's row 0 (tiled renders)
         float sensor_height = 0.0f;     // sensor rows in this render's pixels (0 = the render height)
+        // --motion-blur (LFQPLCYM): the exposure on top of the row times. A row read at time t integrates its pose over
+        // [t - Te/2, t + Te/2] (its rolling-shutter time is the middle of its exposure). Screen-space model
+        // (rolling_shutter.cuh, blur_*): each splat's dilated 2D covariance S0 gets + dmu dmu^T / 12 (the variance of
+        // a box of length |dmu|), dmu = J (p(t + Te/2) - p(t - Te/2)) the smear of its centre (p(.) the camera-space
+        // centre through the motion's pose, rotation and travel; J the lens Jacobian at p(t)), and its opacity
+        // x sqrt(det S0 / det(S0 + dmu dmu^T / 12)) so its integrated coverage is unchanged.
+        const float* exposure = nullptr;       // device [1]: T, seconds (null = no blur: the unchanged results)
+        const float* exposure_scale = nullptr; // device [1] optional: this camera's learned scale (Te = T x scale; null = 1)
+        float* grad_exposure = nullptr;        // device [1] optional: the backward adds dL/d(exposure scale) (caller zeros)
+        float* smear = nullptr;                // device [N] optional (checks): |dmu| in pixels per drawn model splat
+        float time_offset = 0.0f;              // seconds added to every splat's time (sub-exposure reference renders)
     };
 } // namespace fast_lfs::rasterization
 

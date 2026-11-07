@@ -346,6 +346,30 @@ namespace lfs::core::param {
             .ui_step(1000)
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .bool_prop(&OptimizationParameters::motion_blur,
+                       "motion_blur", "Motion Blur", d.motion_blur,
+                       "With --rolling-shutter: model the blur of each frame's exposure (--exposure-ms) on top of the row times: each splat's 2D covariance is widened along its exposure smear (camera rotation and travel at the splat) and its opacity scaled to keep its coverage")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::exposure_ms,
+                        "exposure_ms", "Exposure (ms)", d.exposure_ms, 0.0f, 50.0f,
+                        "--motion-blur: the exposure time in milliseconds (1/500 s = 2); 0 = no blur (identical to without --motion-blur)")
+            .precision(3)
+            .ui_step(0.1)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .bool_prop(&OptimizationParameters::motion_blur_learn_exposure,
+                       "motion_blur_learn_exposure", "Learn Exposure Scale", d.motion_blur_learn_exposure,
+                       "--motion-blur: learn a per-camera scale of the exposure (start 1, clamped to [0.5, 2]) from --rs-learn-start; written to motion_blur_exposure.txt")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::motion_blur_exposure_lr,
+                        "motion_blur_exposure_lr", "Exposure Scale LR", d.motion_blur_exposure_lr, 0.0f, 1.0f,
+                        "--motion-blur-learn-exposure: Adam step of the scale per camera update")
+            .precision(4)
+            .ui_step(0.001)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .bool_prop(&OptimizationParameters::loss_ycc,
                        "loss_ycc", "YCbCr Loss", d.loss_ycc,
                        "Photometric loss in BT.709 full-range Y'CbCr of the image the RGB loss sees (after the cubemap composite and PPISP) and of the target: L1 + D-SSIM on luma at full resolution instead of the RGB L1 + D-SSIM, plus an L1 on Cb and Cr after a 2x2 box downsample (half resolution: 4:2:0 video carries no finer colour); masks keep only fully kept 2x2 blocks for the chroma term")

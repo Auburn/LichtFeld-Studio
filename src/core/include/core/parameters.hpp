@@ -348,6 +348,16 @@ namespace lfs::core {
             // > rs_learn_start with both the readout and motion learned: the readout until then, the motion after (0 = both
             // from rs_learn_start; they trade off: a longer readout with slower motion draws the same frame)
             size_t rs_motion_start = 0;
+            // --motion-blur (LFQPLCYM; with --rolling-shutter): the exposure's blur on top of the row times. Each row
+            // integrates its pose over [t - T/2, t + T/2] around its rolling-shutter time t, T = exposure_ms; modelled in
+            // screen space (each splat's 2D covariance widened along its exposure smear, opacity scaled to keep its
+            // coverage; FastGSRollingShutter::exposure). exposure_ms 0 = off. motion_blur_learn_exposure: a per-camera
+            // scale of T (start 1, clamped to [0.5, 2]) learned from rs_learn_start by Adam (motion_blur_exposure_lr per
+            // camera update); written to <output>/motion_blur_exposure.txt.
+            bool motion_blur = false;
+            float exposure_ms = 2.0f;
+            bool motion_blur_learn_exposure = false;
+            float motion_blur_exposure_lr = 0.01f;
             // Per-camera pose refinement (standard rasterizer, --native-fisheye only, with or without the rolling shutter;
             // training/pose_refinement.hpp): every training camera's pose gets an offset (rotation, camera-centre move)
             // refined by a per-camera Adam step after its backward, pose_lr_deg degrees and pose_lr_units scene units per

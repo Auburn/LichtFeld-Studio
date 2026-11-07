@@ -47,8 +47,10 @@ namespace fast_lfs::rasterization::kernels::forward {
         return (static_cast<InstanceKey>(tile_key) << kInstanceDepthBits) | static_cast<InstanceKey>(depth_key);
     }
 
-    // SHAPE (--kernel-shape, LFQPLCYK): beta from shape_raw drives the bounds; off = the unchanged kernels
-    template <bool FISHEYE, bool RS = false, bool RADIAL = false, bool SHAPE = false>
+    // BLUR: --motion-blur (LFQPLCYM; RS only). SHAPE (--kernel-shape, LFQPLCYK): beta from shape_raw drives the bounds.
+    // LFQPLCYKM: both template arguments, in this order; off = the unchanged kernels (BLUR && SHAPE: the smear moment-matched
+    // to the beta kernel, kshape::blur_smear_scale).
+    template <bool FISHEYE, bool RS = false, bool RADIAL = false, bool BLUR = false, bool SHAPE = false>
     __global__ void preprocess_cu(
         const float3* __restrict__ means,
         const float3* __restrict__ raw_scales,
@@ -120,9 +122,12 @@ namespace fast_lfs::rasterization::kernels::forward {
 
         // this splat's world-to-camera rows (rolling shutter: those of the pose at its capture time)
         float4 w2c_rows[3] = {w2c[0], w2c[1], w2c[2]};
+        rolling_shutter::Motion rs_motion{};
+        float rs_s = 0.0f;
+        (void)rs_s;
         if constexpr (RS) {
-            const auto rs_motion = rolling_shutter::load_motion(rs);
-            const float rs_s = rolling_shutter::splat_rows<FISHEYE, RADIAL>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows, primitive_idx);
+            rs_motion = rolling_shutter::load_motion(rs);
+            rs_s = rolling_shutter::splat_rows<FISHEYE, RADIAL, BLUR>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows, primitive_idx);
             if (rs.times != nullptr && rs.times_fixed == 0 && active)
                 rs.times[primitive_idx] = rs_s;
         }
@@ -209,12 +214,17 @@ namespace fast_lfs::rasterization::kernels::forward {
         const float4 w2c_r2 = w2c_rows[1];
         float2 mean2d;
         float3 jw_r1, jw_r2;
+        float3 lens_j1 = make_float3(0.0f, 0.0f, 0.0f), lens_j2 = make_float3(0.0f, 0.0f, 0.0f); // --motion-blur
+        (void)lens_j1;
+        (void)lens_j2;
         if constexpr (FISHEYE) {
             // analytic Jacobian of the lens at the centre (EWA); inactive lanes get a harmless point
             const float3 p = active ? cam_p : make_float3(0.0f, 0.0f, 1.0f);
             const auto t = fisheye::terms_lens<false, RADIAL>(lens, p.x * p.x + p.y * p.y, p.z);
             float3 j1, j2;
             fisheye::project(t, p, fx, fy, cx, cy, mean2d, j1, j2);
+            lens_j1 = j1;
+            lens_j2 = j2;
             jw_r1 = make_float3(
                 j1.x * w2c_r1.x + j1.y * w2c_r2.x + j1.z * w2c_r3.x,
                 j1.x * w2c_r1.y + j1.y * w2c_r2.y + j1.z * w2c_r3.y,
@@ -265,11 +275,41 @@ namespace fast_lfs::rasterization::kernels::forward {
         if (det < config::min_cov2d_determinant)
             active = false;
         const float det_rcp = 1.0f / det;
-        const float output_opacity = mip_filter ? opacity * sqrtf(det_raw * det_rcp) : opacity;
+        float output_opacity = mip_filter ? opacity * sqrtf(det_raw * det_rcp) : opacity;
         if (output_opacity < c_splat_cutoff.min_alpha)
             active = false;
 
-        const float3 conic = make_float3(cov2d.z * det_rcp, -cov2d.y * det_rcp, cov2d.x * det_rcp);
+        float3 conic = make_float3(cov2d.z * det_rcp, -cov2d.y * det_rcp, cov2d.x * det_rcp);
+
+        // --motion-blur (RS only; FastGSRollingShutter::exposure): S_b = S0 + dmu dmu^T / 12 replaces the dilated covariance S0
+        // (conic, bounds, cut), opacity x sqrt(det S0 / det S_b) keeps its coverage. After the original expressions, which stay
+        // untouched (the flag-off path is D:/lfrqplcy's bit for bit).
+        if constexpr (RS && BLUR) {
+            if (rs.exposure != nullptr) {
+                const float Te = rolling_shutter::exposure_of(rs);
+                const float3 dp = rolling_shutter::blur_chord(rs_motion, rolling_shutter::splat_time(rs, rs_motion, rs_s), Te,
+                                                              rolling_shutter::mid_point(w2c, mean3d));
+                const float2 dmu = active ? make_float2(dot(lens_j1, dp), dot(lens_j2, dp)) : make_float2(0.0f, 0.0f);
+                float k12 = 1.0f / 12.0f;
+                if constexpr (SHAPE) { // --kernel-shape too (LFQPLCYKM): the smear moment-matched to the beta kernel
+                    if (shape_raw != nullptr)
+                        k12 = kshape::blur_smear_scale(kshape::beta_from_raw(shape_raw[primitive_idx]));
+                }
+                cov2d.x += k12 * dmu.x * dmu.x;
+                cov2d.y += k12 * dmu.x * dmu.y;
+                cov2d.z += k12 * dmu.y * dmu.y;
+                const float detb = cov2d.x * cov2d.z - cov2d.y * cov2d.y;
+                if (!(detb >= config::min_cov2d_determinant))
+                    active = false;
+                const float rb = 1.0f / detb;
+                conic = make_float3(cov2d.z * rb, -cov2d.y * rb, cov2d.x * rb);
+                output_opacity *= (det > 0.0f && detb > 0.0f) ? sqrtf(det / detb) : 1.0f;
+                if (output_opacity < c_splat_cutoff.min_alpha)
+                    active = false;
+                if (rs.smear != nullptr && active)
+                    rs.smear[primitive_idx] = sqrtf(dmu.x * dmu.x + dmu.y * dmu.y);
+            }
+        }
 
         // Compute bounds
         // --kernel-shape (LFQPLCYK): beta from the raw r; every bound below uses the alpha = 1/255 contour of

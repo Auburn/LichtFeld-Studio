@@ -46,6 +46,12 @@ namespace lfs::training {
         // fixed). 0 = both from learn_start.
         int motion_start = 0;
         int iters = 2;
+        // --motion-blur (LFQPLCYM): exposure_ms > 0 = the exposure blur (FastGSRollingShutter::exposure); learn_exposure =
+        // a per-camera scale of it (Adam, exposure_lr per camera update, from learn_start, clamped to [0.5, 2]).
+        bool motion_blur = false;
+        float exposure_ms = 0.0f;
+        bool learn_exposure = false;
+        float exposure_lr = 0.01f;
     };
 
     class RollingShutterMotion {
@@ -72,6 +78,13 @@ namespace lfs::training {
         [[nodiscard]] bool motion_learning(int iter) const;
         [[nodiscard]] bool readout_learning(int iter) const;
         [[nodiscard]] const std::string& description() const { return description_; }
+        // --motion-blur: the start-up line ("" without --motion-blur), whether the scale is learned (at all / now),
+        // a one-line summary of the learned scales (host copy: call rarely) and their file (name scale exposure_ms).
+        [[nodiscard]] const std::string& blur_description() const { return blur_description_; }
+        [[nodiscard]] bool exposure_learned() const { return exp_scale_ != nullptr; }
+        [[nodiscard]] bool exposure_learning(int iter) const;
+        std::string exposure_summary(cudaStream_t stream);
+        bool save_exposure(const std::filesystem::path& file, cudaStream_t stream, std::string& error);
 
     private:
         RollingShutterMotion() = default;
@@ -95,6 +108,11 @@ namespace lfs::training {
         float* readout_state_ = nullptr; // [3]
         float* grad_ = nullptr;     // [13]
         int* nb_ = nullptr;         // [N,2]
+        std::string blur_description_;
+        float* exposure_ = nullptr;  // [1] seconds (null = no blur)
+        float* exp_scale_ = nullptr; // [N] learned scale (null = not learned)
+        float* exp_state_ = nullptr; // [N,3] Adam m, v, steps
+        float* exp_grad_ = nullptr;  // [1]
     };
 
 } // namespace lfs::training

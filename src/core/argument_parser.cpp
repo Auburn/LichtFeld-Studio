@@ -89,6 +89,10 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--rs-motion-start", "rs_motion_start", Integer},
             OptimizationCliBinding{"--pose-opt", "pose_opt", Bool},
             OptimizationCliBinding{"--loss-ycc", "loss_ycc", Bool},
+            OptimizationCliBinding{"--motion-blur", "motion_blur", Bool},
+            OptimizationCliBinding{"--exposure-ms", "exposure_ms", Float},
+            OptimizationCliBinding{"--motion-blur-learn-exposure", "motion_blur_learn_exposure", Bool},
+            OptimizationCliBinding{"--motion-blur-exposure-lr", "motion_blur_exposure_lr", Float},
             OptimizationCliBinding{"--loss-ycc-chroma-weight", "loss_ycc_chroma_weight", Float},
             OptimizationCliBinding{"--loss-ycc-luma-scale", "loss_ycc_luma_scale", Float},
             OptimizationCliBinding{"--max-std-dev", "max_std_dev", Float},
@@ -892,6 +896,10 @@ namespace {
             ::args::ValueFlag<int> rs_motion_start(training_group, "iter", lfs::core::args::optimization_cli_help("--rs-motion-start"), {"rs-motion-start"});
             ::args::Flag pose_opt(training_group, "enabled", lfs::core::args::optimization_cli_help("--pose-opt"), {"pose-opt"});
             ::args::Flag loss_ycc(training_group, "enabled", lfs::core::args::optimization_cli_help("--loss-ycc"), {"loss-ycc"});
+            ::args::Flag motion_blur(training_group, "enabled", lfs::core::args::optimization_cli_help("--motion-blur"), {"motion-blur"});
+            ::args::ValueFlag<float> exposure_ms(training_group, "ms", lfs::core::args::optimization_cli_help("--exposure-ms"), {"exposure-ms"});
+            ::args::Flag motion_blur_learn_exposure(training_group, "enabled", lfs::core::args::optimization_cli_help("--motion-blur-learn-exposure"), {"motion-blur-learn-exposure"});
+            ::args::ValueFlag<float> motion_blur_exposure_lr(training_group, "lr", lfs::core::args::optimization_cli_help("--motion-blur-exposure-lr"), {"motion-blur-exposure-lr"});
             ::args::ValueFlag<float> loss_ycc_chroma_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--loss-ycc-chroma-weight"), {"loss-ycc-chroma-weight"});
             ::args::ValueFlag<float> loss_ycc_luma_scale(training_group, "scale", lfs::core::args::optimization_cli_help("--loss-ycc-luma-scale"), {"loss-ycc-luma-scale"});
             ::args::ValueFlag<float> max_std_dev(training_group, "sigmas", lfs::core::args::optimization_cli_help("--max-std-dev"), {"max-std-dev"});
@@ -1738,6 +1746,10 @@ namespace {
                                         rs_motion_start_val = cli_option_present({"--rs-motion-start"}) ? std::optional<int>(::args::get(rs_motion_start)) : std::optional<int>(),
                                         pose_opt_flag = bool(pose_opt),
                                         loss_ycc_flag = bool(loss_ycc),
+                                        motion_blur_flag = bool(motion_blur),
+                                        exposure_ms_val = cli_option_present({"--exposure-ms"}) ? std::optional<float>(::args::get(exposure_ms)) : std::optional<float>(),
+                                        motion_blur_learn_exposure_flag = bool(motion_blur_learn_exposure),
+                                        motion_blur_exposure_lr_val = cli_option_present({"--motion-blur-exposure-lr"}) ? std::optional<float>(::args::get(motion_blur_exposure_lr)) : std::optional<float>(),
                                         loss_ycc_chroma_weight_val = cli_option_present({"--loss-ycc-chroma-weight"}) ? std::optional<float>(::args::get(loss_ycc_chroma_weight)) : std::optional<float>(),
                                         loss_ycc_luma_scale_val = cli_option_present({"--loss-ycc-luma-scale"}) ? std::optional<float>(::args::get(loss_ycc_luma_scale)) : std::optional<float>(),
                                         max_std_dev_val = cli_option_present({"--max-std-dev"}) ? std::optional<float>(::args::get(max_std_dev)) : std::optional<float>(),
@@ -1976,6 +1988,12 @@ namespace {
                     opt.pose_opt = true;
                 if (loss_ycc_flag)
                     opt.loss_ycc = true;
+                if (motion_blur_flag)
+                    opt.motion_blur = true;
+                setVal(exposure_ms_val, opt.exposure_ms);
+                if (motion_blur_learn_exposure_flag)
+                    opt.motion_blur_learn_exposure = true;
+                setVal(motion_blur_exposure_lr_val, opt.motion_blur_exposure_lr);
                 setVal(loss_ycc_chroma_weight_val, opt.loss_ycc_chroma_weight);
                 setVal(loss_ycc_luma_scale_val, opt.loss_ycc_luma_scale);
                 setVal(max_std_dev_val, opt.max_std_dev);
@@ -2196,6 +2214,10 @@ namespace {
                 note_opt("rs_motion_start", rs_motion_start_val.has_value());
                 note_opt("pose_opt", pose_opt_flag);
                 note_opt("loss_ycc", loss_ycc_flag);
+                note_opt("motion_blur", motion_blur_flag);
+                note_opt("exposure_ms", exposure_ms_val.has_value());
+                note_opt("motion_blur_learn_exposure", motion_blur_learn_exposure_flag);
+                note_opt("motion_blur_exposure_lr", motion_blur_exposure_lr_val.has_value());
                 note_opt("loss_ycc_chroma_weight", loss_ycc_chroma_weight_val.has_value());
                 note_opt("loss_ycc_luma_scale", loss_ycc_luma_scale_val.has_value());
                 note_opt("max_std_dev", max_std_dev_val.has_value());

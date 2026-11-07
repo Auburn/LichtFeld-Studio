@@ -42,7 +42,8 @@ namespace fast_lfs::rasterization::kernels::backward {
     // the Jacobian's own derivative and the rolling-shutter row solve come from the radial lens table; the pose gradient
     // below is built from this kernel's fish_j1 / fish_j2, dL_dmean3d_cam and rs_s, so it goes through the table too.
     template <bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES = false, bool FISHEYE = false, bool RS = false,
-              bool POSE = false, bool RADIAL = false>
+              bool POSE = false, bool RADIAL = false, bool BLUR = false, // BLUR: --motion-blur (RS only)
+              bool SHAPE = false> // SHAPE (LFQPLCYKM, BLUR only): --kernel-shape with the blur: the smear moment-matched to beta
     __global__ void __launch_bounds__(config::block_size_preprocess_backward, 3) preprocess_backward_cu(
         // These four alias fused_adam.{means,scaling,rotation,opacity}.param (Adam writes).
         const float3* means,
@@ -88,7 +89,13 @@ namespace fast_lfs::rasterization::kernels::backward {
         // dynamic rolling shutter (RS only): the forward's per-splat poses; rs.grad != null adds dL/d(motion, readout)
         const FastGSRollingShutter rs,
         // --pose-opt (POSE only): [6] dL/d(left perturbation of w2c) is added (pose_gradient.cuh)
-        float* __restrict__ pose_grad) {
+        float* __restrict__ pose_grad,
+        // --kernel-shape with --motion-blur (BLUR && SHAPE only; LFQPLCYKM): raw r per primitive and the dL/dbeta buffer the
+        // blend backward fills (the smear's dc/dbeta term is added here); unused otherwise
+        const float* __restrict__ shape_raw,
+        float* __restrict__ shape_grad) {
+        (void)shape_raw;
+        (void)shape_grad;
         static_assert(!RS || FISHEYE, "the rolling shutter is implemented for the native fisheye path");
         static_assert(!POSE || FISHEYE, "the pose gradient is implemented for the native fisheye path");
         static_assert(!RADIAL || FISHEYE, "the radial lens table is implemented for the native fisheye path");
@@ -314,6 +321,9 @@ namespace fast_lfs::rasterization::kernels::backward {
         // rolling shutter: this thread's dL/d(motion[12], readout), summed over the block after the geometry
         float rs_acc[13] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         (void)rs_acc;
+        // --motion-blur: this thread's dL/d(exposure scale), summed over the warp after the geometry
+        float blur_exp_acc = 0.0f;
+        (void)blur_exp_acc;
         // pose refinement (POSE only): this thread's dL/d(left perturbation of w2c), summed over the block after the geometry
         float pose_acc[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         (void)pose_acc;
@@ -329,7 +339,7 @@ namespace fast_lfs::rasterization::kernels::backward {
             (void)rs_s;
             if constexpr (RS) {
                 rs_motion = rolling_shutter::load_motion(rs);
-                rs_s = rolling_shutter::splat_rows<FISHEYE, RADIAL>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows,
+                rs_s = rolling_shutter::splat_rows<FISHEYE, RADIAL, BLUR>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows,
                                                            static_cast<uint>(primitive_idx));
             }
             const float4 w2c_r3 = w2c_rows[2];
@@ -430,7 +440,35 @@ namespace fast_lfs::rasterization::kernels::backward {
             const float raw_a = dot(jwc_r1, jw_r1);
             const float raw_b = dot(jwc_r1, jw_r2);
             const float raw_c = dot(jwc_r2, jw_r2);
-            const float a = raw_a + kernel_size, b = raw_b, c = raw_c + kernel_size;
+            // --motion-blur (RS only): the forward's smear dmu = J dp and Sigma_b = Sigma0 + dmu dmu^T / 12
+            bool blur = false;
+            float blur_te = 0.0f, blur_t = 0.0f;
+            float3 blur_dp = make_float3(0.0f, 0.0f, 0.0f);
+            float2 blur_dmu = make_float2(0.0f, 0.0f);
+            (void)blur_te;
+            (void)blur_t;
+            if constexpr (RS && BLUR) {
+                if (rs.exposure != nullptr) {
+                    blur = true;
+                    blur_te = rolling_shutter::exposure_of(rs);
+                    blur_t = rolling_shutter::splat_time(rs, rs_motion, rs_s);
+                    blur_dp = rolling_shutter::blur_chord(rs_motion, blur_t, blur_te, rolling_shutter::mid_point(w2c, mean3d));
+                    blur_dmu = make_float2(dot(fish_j1, blur_dp), dot(fish_j2, blur_dp));
+                }
+            }
+            float blur_k12 = 1.0f / 12.0f;
+            float blur_beta = 2.0f; // --kernel-shape with the blur (LFQPLCYKM): c(beta) = 1 / (12 m(beta)), kernel_shape.cuh
+            (void)blur_beta;
+            if constexpr (RS && BLUR && SHAPE) {
+                if (blur && shape_raw != nullptr) {
+                    blur_beta = kshape::beta_from_raw(shape_raw[primitive_idx]);
+                    blur_k12 = kshape::blur_smear_scale(blur_beta);
+                }
+            }
+            const float a0 = raw_a + kernel_size, b0 = raw_b, c0 = raw_c + kernel_size;
+            const float a = blur ? a0 + blur_k12 * blur_dmu.x * blur_dmu.x : a0;
+            const float b = blur ? b0 + blur_k12 * blur_dmu.x * blur_dmu.y : b0;
+            const float c = blur ? c0 + blur_k12 * blur_dmu.y * blur_dmu.y : c0;
             const float aa = a * a, bb = b * b, cc = c * c;
             const float ac = a * c, ab = a * b, bc = b * c;
             const float determinant = ac - bb;
@@ -455,9 +493,39 @@ namespace fast_lfs::rasterization::kernels::backward {
                 }
             }
 
+            // --motion-blur: output opacity = opacity x kappa, kappa = sqrt(det S0 / det S_b) (the forward's)
+            float blur_kappa = 1.0f;
+            const float blur_det0 = a0 * c0 - b0 * b0;
+            if (blur) {
+                blur_kappa = (blur_det0 > 0.0f && determinant > 0.0f) ? sqrtf(blur_det0 / determinant) : 1.0f;
+                opacity_compensation *= blur_kappa;
+            }
+
             const float sigmoid_derivative = original_opacity * (1.0f - original_opacity);
             opacity_grads[0] = grad_compensated_opacity * opacity_compensation * sigmoid_derivative +
                                opacity_extra_grad(fused_adam, fused_adam.opacity, primitive_idx);
+
+            // --motion-blur: kappa's dependence on S_b and S0 (d log det S = S^-1 : dS; dL_dcov2d's (a, b/2, c) convention),
+            // then dL/d(dmu) = 2/12 G dmu (G = dL/dS_b), dL/d(dp) = J^T dL/d(dmu), dL/dJ = dL/d(dmu) dp^T
+            float2 blur_g_dmu = make_float2(0.0f, 0.0f);
+            float3 blur_g_dp = make_float3(0.0f, 0.0f, 0.0f);
+            if (blur) {
+                const float gk = 0.5f * grad_compensated_opacity * original_opacity * blur_kappa;
+                dL_dcov2d -= (gk * determinant_rcp) * make_float3(c, -b, a);
+                const float3 G = dL_dcov2d;
+                if (blur_det0 > 0.0f)
+                    dL_dcov2d += (gk / blur_det0) * make_float3(c0, -b0, a0);
+                blur_g_dmu = (2.0f * blur_k12) * make_float2(G.x * blur_dmu.x + G.y * blur_dmu.y, G.y * blur_dmu.x + G.z * blur_dmu.y);
+                blur_g_dp = fish_j1 * blur_g_dmu.x + fish_j2 * blur_g_dmu.y;
+                if constexpr (RS && BLUR && SHAPE) { // dL/dbeta += (dmu^T G dmu) dc/dbeta (G symmetric, off-diagonal G.y)
+                    if (shape_raw != nullptr && shape_grad != nullptr) {
+                        const float g_c = G.x * blur_dmu.x * blur_dmu.x + 2.0f * G.y * blur_dmu.x * blur_dmu.y + G.z * blur_dmu.y * blur_dmu.y;
+                        const float g_beta = g_c * kshape::blur_smear_scale_dbeta(blur_beta, blur_k12);
+                        if (g_beta != 0.0f && isfinite(g_beta))
+                            atomicAdd(&shape_grad[primitive_idx], g_beta);
+                    }
+                }
+            }
 
             // 3d covariance gradient
             const mat3x3_triu dL_dcov3d = {
@@ -492,14 +560,18 @@ namespace fast_lfs::rasterization::kernels::backward {
             if constexpr (FISHEYE) {
                 // through the projected centre (J^T dL/dmean2d), through J itself (its Hessian
                 // against dL/dJ), and through the depth, which is the distance from the camera
-                const float3 dL_dj_r1 = make_float3(
+                float3 dL_dj_r1 = make_float3(
                     dL_dj11,
                     w2c_r2.x * dL_djw_r1.x + w2c_r2.y * dL_djw_r1.y + w2c_r2.z * dL_djw_r1.z,
                     dL_dj13);
-                const float3 dL_dj_r2 = make_float3(
+                float3 dL_dj_r2 = make_float3(
                     w2c_r1.x * dL_djw_r2.x + w2c_r1.y * dL_djw_r2.y + w2c_r1.z * dL_djw_r2.z,
                     dL_dj22,
                     dL_dj23);
+                if (blur) { // --motion-blur: the smear's lens Jacobian at p(t)
+                    dL_dj_r1 += blur_g_dmu.x * blur_dp;
+                    dL_dj_r2 += blur_g_dmu.y * blur_dp;
+                }
                 const float inv_dist = rsqrtf(fmaxf(dot(cam_p, cam_p), 1e-20f));
                 dL_dmean3d_cam = fish_j1 * dL_dmean2d.x + fish_j2 * dL_dmean2d.y +
                                  fisheye::jacobian_backward(fish_terms, cam_p, fx, fy, dL_dj_r1, dL_dj_r2) +
@@ -558,7 +630,11 @@ namespace fast_lfs::rasterization::kernels::backward {
                 w2c_r1.y * dL_dmean3d_cam.x + w2c_r2.y * dL_dmean3d_cam.y + w2c_r3.y * dL_dmean3d_cam.z,
                 w2c_r1.z * dL_dmean3d_cam.x + w2c_r2.z * dL_dmean3d_cam.y + w2c_r3.z * dL_dmean3d_cam.z);
 
-            const float3 dL_dmean3d = dL_dmean3d_from_splatting + dL_dmean3d_from_color;
+            float3 dL_dmean3d = dL_dmean3d_from_splatting + dL_dmean3d_from_color;
+            if constexpr (RS) {
+                if (blur) // --motion-blur: through the chord's endpoints
+                    dL_dmean3d += rolling_shutter::blur_mean_grad(rs_motion, blur_t, blur_te, w2c, blur_g_dp);
+            }
             const float3 clamped_mean = clamp_grad3(dL_dmean3d);
             mean_grads[0] = clamped_mean.x;
             mean_grads[1] = clamped_mean.y;
@@ -650,6 +726,24 @@ namespace fast_lfs::rasterization::kernels::backward {
                     const float4 mid_rows[3] = {w2c[0], w2c[1], w2c[2]};
                     rolling_shutter::motion_grad(rs_motion, rs_s, mid_rows, GW, dL_dmean3d_cam, rs_acc);
                 }
+                // --motion-blur: the chord's endpoint rows W'+- = E(t +- Te/2) W, b'+- = E (b - d): dL/dW'+- = +-g x^T,
+                // dL/db'+- = +-g (g = dL/d(dp)); dL/d(motion, tau) and, from dL/dt+-, dL/d(scale) = T (dL/dt+ - dL/dt-) / 2
+                if (blur && (rs.grad != nullptr || rs.grad_exposure != nullptr)) {
+                    const float4 mid_rows_b[3] = {w2c[0], w2c[1], w2c[2]};
+                    float3 GWp[3], GWm[3];
+                    const float gv[3] = {blur_g_dp.x, blur_g_dp.y, blur_g_dp.z};
+#pragma unroll
+                    for (int k = 0; k < 3; ++k) {
+                        GWp[k] = gv[k] * mean3d;
+                        GWm[k] = -gv[k] * mean3d;
+                    }
+                    const float gtp = rolling_shutter::motion_grad_at(rs_motion, blur_t + 0.5f * blur_te, rs_s, mid_rows_b, GWp,
+                                                                      blur_g_dp, rs_acc);
+                    const float gtm = rolling_shutter::motion_grad_at(rs_motion, blur_t - 0.5f * blur_te, rs_s, mid_rows_b, GWm,
+                                                                      -blur_g_dp, rs_acc);
+                    if (rs.grad_exposure != nullptr)
+                        blur_exp_acc += 0.5f * (gtp - gtm) * __ldg(rs.exposure);
+                }
             }
 
             if constexpr (POSE) {
@@ -684,6 +778,23 @@ namespace fast_lfs::rasterization::kernels::backward {
                     }
                     const float4 given_rows[3] = {w2c[0], w2c[1], w2c[2]};
                     pose::splat_grad(E, given_rows, GW, dL_dmean3d_cam, dL_dmean3d_from_color, pose_acc);
+                    if constexpr (RS) {
+                        if (blur) { // --motion-blur: the chord's endpoint rows (as for the motion above)
+                            float3 Ep[3], Em[3], d_p, d_m;
+                            rolling_shutter::pose_at(rs_motion, blur_t + 0.5f * blur_te, Ep, d_p);
+                            rolling_shutter::pose_at(rs_motion, blur_t - 0.5f * blur_te, Em, d_m);
+                            float3 GWp[3], GWm[3];
+                            const float gv[3] = {blur_g_dp.x, blur_g_dp.y, blur_g_dp.z};
+#pragma unroll
+                            for (int k = 0; k < 3; ++k) {
+                                GWp[k] = gv[k] * mean3d;
+                                GWm[k] = -gv[k] * mean3d;
+                            }
+                            const float3 no_col = make_float3(0.0f, 0.0f, 0.0f);
+                            pose::splat_grad(Ep, given_rows, GWp, blur_g_dp, no_col, pose_acc);
+                            pose::splat_grad(Em, given_rows, GWm, -blur_g_dp, no_col, pose_acc);
+                        }
+                    }
                 }
             }
 
@@ -714,6 +825,14 @@ namespace fast_lfs::rasterization::kernels::backward {
         if constexpr (RS) {
             if (rs.grad != nullptr)
                 rolling_shutter::block_add13(rs_acc, rs.grad);
+            if (BLUR && rs.grad_exposure != nullptr) { // --motion-blur: one atomic per warp (rs.grad_exposure is uniform)
+                float x = blur_exp_acc;
+#pragma unroll
+                for (int o = 16; o > 0; o >>= 1)
+                    x += __shfl_down_sync(0xffffffffu, x, o);
+                if ((threadIdx.x & 31u) == 0u && x != 0.0f)
+                    atomicAdd(rs.grad_exposure, x);
+            }
         }
         // pose refinement: likewise (pose_grad is uniform over the grid)
         if constexpr (POSE) {

@@ -219,8 +219,8 @@ void fast_lfs::rasterization::backward(
     float clip_left, clip_right, clip_top, clip_bottom;
     ewa_clip_bounds(w_f, h_f, fx, fy, cx, cy, clip_left, clip_right, clip_top, clip_bottom);
     if (n_primitives > 0) {
-        auto launch_preprocess_backward_lens = [&]<bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES, bool FISHEYE, bool RS, bool POSE, bool RADIAL>() {
-            kernels::backward::preprocess_backward_cu<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, FISHEYE, RS, POSE, RADIAL><<<div_round_up(n_primitives, config::block_size_preprocess_backward), config::block_size_preprocess_backward, 0, stream>>>(
+        auto launch_preprocess_backward_lens = [&]<bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES, bool FISHEYE, bool RS, bool POSE, bool RADIAL, bool BLUR, bool SHAPE = false>() {
+            kernels::backward::preprocess_backward_cu<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, FISHEYE, RS, POSE, RADIAL, BLUR, SHAPE><<<div_round_up(n_primitives, config::block_size_preprocess_backward), config::block_size_preprocess_backward, 0, stream>>>(
                 means,
                 scales_raw,
                 rotations_raw,
@@ -258,7 +258,9 @@ void fast_lfs::rasterization::backward(
                 distortion.moments != nullptr ? distortion.grad_depths : nullptr,
                 distortion.depth_mode,
                 rs,
-                pose_grad);
+                pose_grad,
+                SHAPE ? shape_raw : nullptr,
+                SHAPE ? shape_grad : nullptr);
             LFS_CUDA_LAUNCH_CHECK(stream, "fastgs.backward.preprocess_backward");
         };
         auto launch_preprocess_backward = [&]<bool MIP_FILTER, int ACTIVE_SH_BASES, bool DISABLED_FEATURES>() {
@@ -267,24 +269,43 @@ void fast_lfs::rasterization::backward(
             // or without POSE (LFQPL: the pose gradient then goes through the table); otherwise exactly the kernels as
             // before. Template arguments after DISABLED_FEATURES: FISHEYE, RS, POSE, RADIAL.
             const bool radial = lens.model == kLensFisheye && lens.radial.seg != nullptr;
+            // --motion-blur (LFQPLCYM): the rolling shutter with the exposure (or a sub-exposure time offset) = BLUR variants
+            if constexpr (!MIP_FILTER) {
+                if (rs.motion != nullptr && (rs.exposure != nullptr || rs.time_offset != 0.0f)) {
+                    // LFQPLCYKM: with --kernel-shape the BLUR kernels read beta (the smear moment-matched to it, SHAPE = true)
+                    if (pose_grad != nullptr && radial)
+                        (shape_raw != nullptr ? launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, true, true, true, true>()
+                                             : launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, true, true, true, false>());
+                    else if (pose_grad != nullptr)
+                        (shape_raw != nullptr ? launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, true, false, true, true>()
+                                             : launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, true, false, true, false>());
+                    else if (radial)
+                        (shape_raw != nullptr ? launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, false, true, true, true>()
+                                             : launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, false, true, true, false>());
+                    else
+                        (shape_raw != nullptr ? launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, false, false, true, true>()
+                                             : launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, false, false, true, false>());
+                    return;
+                }
+            }
             if (pose_grad != nullptr && radial && rs.motion != nullptr)
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, true, true>();
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, true, true, false>();
             else if (pose_grad != nullptr && radial)
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, false, true, true>();
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, false, true, true, false>();
             else if (pose_grad != nullptr && rs.motion != nullptr)
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, true, false>();
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, true, false, false>();
             else if (pose_grad != nullptr)
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, false, true, false>();
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, false, true, false, false>();
             else if (radial && rs.motion != nullptr)
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, false, true>();
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, false, true, false>();
             else if (radial)
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, false, false, true>();
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, false, false, true, false>();
             else if (lens.model == kLensFisheye && rs.motion != nullptr)
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, false, false>();
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, true, false, false, false>();
             else if (lens.model == kLensFisheye)
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, false, false, false>();
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, true, false, false, false, false>();
             else
-                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, false, false, false, false>();
+                launch_preprocess_backward_lens.template operator()<MIP_FILTER, ACTIVE_SH_BASES, DISABLED_FEATURES, false, false, false, false, false>();
         };
         const bool disabled_features = fused_adam.erank_reg_weight <= 0.0f &&
                                        fused_adam.dc_reg_weight <= 0.0f &&

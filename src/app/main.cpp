@@ -45,6 +45,8 @@ namespace lfs::app {
     int run_lfe_lossweight_tool(int argc, const char* const* argv);
     // Developer checks of the dynamic rolling shutter (lfe_rs_tool.cpp).
     int run_lfe_rs_tool(int argc, const char* const* argv);
+    // Developer checks of the motion blur (--motion-blur; lfe_blur_tool.cpp).
+    int run_lfe_blur_tool(int argc, const char* const* argv);
     // Developer checks of the per-camera pose refinement, --pose-opt (lfe_pose_tool.cpp).
     int run_lfe_pose_tool(int argc, const char* const* argv);
     // Developer checks of the per-splat kernel shape, --kernel-shape (lfe_shape_tool.cpp).
@@ -264,6 +266,8 @@ int main(int argc, char* argv[]) {
         return lfs::app::run_lfe_lossweight_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-rs")
         return lfs::app::run_lfe_rs_tool(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "lfe-blur")
+        return lfs::app::run_lfe_blur_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-pose")
         return lfs::app::run_lfe_pose_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-shape")

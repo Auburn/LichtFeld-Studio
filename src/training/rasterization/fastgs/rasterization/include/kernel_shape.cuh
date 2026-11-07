@@ -55,4 +55,35 @@ namespace fast_lfs::rasterization::kshape {
         dE_dbeta = 0.5f * E * __logf(2.0f * s);
     }
 
+    // --motion-blur with --kernel-shape (LFQPLCYKM). The blur widens the splat's 2D shape matrix S (the conic's inverse) by
+    // the exposure smear dmu (px): S_b = S + c(beta) dmu dmu^T, opacity x sqrt(det S / det S_b) (coverage: for any radial
+    // profile f(d) the integral is sqrt(det S) x a constant of f, so the det ratio keeps it exactly for the same beta).
+    // The 2D profile exp(-1/2 d^beta) with shape matrix S has covariance m(beta) S,
+    //   m(beta) = 2^(2/beta) Gamma(4/beta) / (2 Gamma(2/beta))      (m(2) = 1; m(1) = 12, m(3.3) = 0.47, m(8) = 0.29),
+    // so c = 1 / (12 m(beta)) makes the blurred splat's covariance grow by exactly the box's dmu dmu^T / 12 (moment matched;
+    // at beta = 2, c = 1/12 bit for bit: the LFQPLCYM model). The blurred splat keeps its beta (an approximation: the true
+    // smear of a beta profile is not a beta profile; see the report). dc/dbeta = -c dln m/dbeta,
+    //   dln m/dbeta = -(2 ln 2 + 4 psi(4/beta) - 2 psi(2/beta)) / beta^2.
+    __device__ __forceinline__ float digamma_pos(float x) { // psi(x), x > 0: recurrence to x >= 6, then the asymptotic series
+        float r = 0.0f;
+        while (x < 6.0f) {
+            r -= 1.0f / x;
+            x += 1.0f;
+        }
+        const float f = 1.0f / (x * x);
+        return r + logf(x) - 0.5f / x - f * (1.0f / 12.0f - f * (1.0f / 120.0f - f * (1.0f / 252.0f - f * (1.0f / 240.0f))));
+    }
+
+    __device__ __forceinline__ float blur_smear_scale(const float beta) { // c(beta) = 1 / (12 m(beta))
+        if (beta == 2.0f)
+            return 1.0f / 12.0f;
+        const float ln_m = (2.0f / beta - 1.0f) * 0.69314718f + lgammaf(4.0f / beta) - lgammaf(2.0f / beta);
+        return __expf(-ln_m) * (1.0f / 12.0f);
+    }
+
+    __device__ __forceinline__ float blur_smear_scale_dbeta(const float beta, const float c) { // dc/dbeta at c = c(beta)
+        const float dln_m = -(2.0f * 0.69314718f + 4.0f * digamma_pos(4.0f / beta) - 2.0f * digamma_pos(2.0f / beta)) / (beta * beta);
+        return -c * dln_m;
+    }
+
 } // namespace fast_lfs::rasterization::kshape

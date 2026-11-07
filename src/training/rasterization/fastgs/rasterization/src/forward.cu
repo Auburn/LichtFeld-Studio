@@ -260,22 +260,24 @@ fast_lfs::rasterization::ForwardResult fast_lfs::rasterization::forward(
                                  float* screen_share,
                                  const FastGSDistortion& preprocess_distortion) {
         // --lens-radial (LFRL): the radial lens table is its own instantiation (RADIAL = true); the others are unchanged
-        // --kernel-shape (LFQPLCYK): the SHAPE instantiations when shape_raw is bound; otherwise the unchanged kernels
-        auto* const preprocess_kernel = shape_raw != nullptr
-                                            ? (lens.model == kLensFisheye
-                                                   ? (lens.radial.seg != nullptr
-                                                          ? (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true, true, true>
-                                                                                  : kernels::forward::preprocess_cu<true, false, true, true>)
-                                                          : (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true, false, true>
-                                                                                  : kernels::forward::preprocess_cu<true, false, false, true>))
-                                                   : kernels::forward::preprocess_cu<false, false, false, true>)
-                                        : lens.model == kLensFisheye
-                                            ? (lens.radial.seg != nullptr
-                                                   ? (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true, true>
-                                                                           : kernels::forward::preprocess_cu<true, false, true>)
-                                                   : (rs.motion != nullptr ? kernels::forward::preprocess_cu<true, true>
-                                                                           : kernels::forward::preprocess_cu<true, false>))
-                                            : kernels::forward::preprocess_cu<false, false>;
+        // --kernel-shape (LFQPLCYK): the SHAPE instantiations when shape_raw is bound. --motion-blur (LFQPLCYM): the rolling
+        // shutter with the exposure (or a sub-exposure time offset) is its own instantiation (BLUR). LFQPLCYKM: template
+        // arguments <FISHEYE, RS, RADIAL, BLUR, SHAPE>, all five spelled out; with neither flag the kernels are D:/lfrqplcy's,
+        // with one of them the kernels of D:/lfrqplcyk or D:/lfrqplcym.
+        const bool blur = rs.motion != nullptr && (rs.exposure != nullptr || rs.time_offset != 0.0f);
+        auto pick_preprocess = [&]<bool SHAPE>() {
+            return lens.model == kLensFisheye
+                       ? (lens.radial.seg != nullptr
+                              ? (rs.motion != nullptr ? (blur ? kernels::forward::preprocess_cu<true, true, true, true, SHAPE>
+                                                              : kernels::forward::preprocess_cu<true, true, true, false, SHAPE>)
+                                                      : kernels::forward::preprocess_cu<true, false, true, false, SHAPE>)
+                              : (rs.motion != nullptr ? (blur ? kernels::forward::preprocess_cu<true, true, false, true, SHAPE>
+                                                              : kernels::forward::preprocess_cu<true, true, false, false, SHAPE>)
+                                                      : kernels::forward::preprocess_cu<true, false, false, false, SHAPE>))
+                       : kernels::forward::preprocess_cu<false, false, false, false, SHAPE>;
+        };
+        auto* const preprocess_kernel = shape_raw != nullptr ? pick_preprocess.template operator()<true>()
+                                                             : pick_preprocess.template operator()<false>();
         preprocess_kernel<<<div_round_up(n_work_items, static_cast<uint>(config::block_size_preprocess)), config::block_size_preprocess, 0, stream>>>(
             means,
             scales_raw,

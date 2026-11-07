@@ -8,6 +8,12 @@
 //                              backward gradients ("BETA2 IDENTITY OK" when bit-identical).
 //   lfe-shape gradcheck        central finite differences of a weighted image sum on raw r, means, log-scales, rotations
 //                              and raw opacity, with beta != 2 splats overlapping: "SHAPE GRADCHECK OK" or FAILED.
+//   lfe-shape cutcheck         --max-std-dev-distance (LFQPLCYKD): coverage of one splat at beta 1, 1.5, 2, 4, 8 against
+//                              min(alpha contour, C) (and the exponent cut of plain --max-std-dev for contrast), no gradient
+//                              from pixels beyond C, beta = 2 distance mode == plain --max-std-dev: "CUTCHECK OK" or FAILED.
+// Env (refcheck / gradcheck): LFE_SHAPE_CUT=C runs them under the splat cut C, LFE_SHAPE_CUT_MODE=dist (distance, the
+// default) or exp (plain --max-std-dev); refcheck then writes OUTDIR/cut.txt (C, min_alpha, mode) for shape_cut_ref.py, and
+// gradcheck weights 0.75 min(contour, C) and zeroes the weight within 0.1 (in d) of every splat's edge.
 #include "core/kernel_shape_map.hpp"
 
 #include <algorithm>
@@ -22,6 +28,7 @@
 #include <print>
 #include <random>
 #include <rasterization_api.h>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -191,10 +198,34 @@ namespace lfs::app {
             return static_cast<bool>(f);
         }
 
+        // LFQPLCYKD: the cut of this run (LFE_SHAPE_CUT / LFE_SHAPE_CUT_MODE); C = 0 off
+        float g_cut = 0.0f;
+        bool g_cut_dist = true;
+        float min_alpha_now() { return g_cut > 0.0f ? fr::kGameMinAlpha : 1.0f / 255.0f; }
+        // the d at which the cut splat ends: min(contour, C) under the distance cut, the exponent cut's
+        // min((2 min(P, C^2/2))^(1/beta), C) under plain --max-std-dev, the contour without a cut
+        double edge_d(const double o, const double beta) {
+            const double P = std::log(o / min_alpha_now());
+            if (!(P > 0))
+                return 0.0;
+            const double contour = std::pow(2.0 * P, 1.0 / beta);
+            if (!(g_cut > 0.0f))
+                return contour;
+            const double C = g_cut;
+            if (g_cut_dist)
+                return std::min(contour, C);
+            return std::min(std::pow(2.0 * std::min(P, 0.5 * C * C), 1.0 / beta), C);
+        }
+
         int run_refcheck(const std::filesystem::path& out) {
             std::filesystem::create_directories(out);
             const Scene s = make_scene(kRefSplats, 7u);
             const Run a = render(s, false, 1);
+            if (g_cut > 0.0f) {
+                std::ofstream f(out / "cut.txt");
+                f << std::format("{:.9g} {:.9g} {}\n", g_cut, fr::kGameMinAlpha, g_cut_dist ? "dist" : "exp");
+            } else
+                std::filesystem::remove(out / "cut.txt");
             {
                 std::ofstream f(out / "scene.txt");
                 f << std::format("# lfe-shape refcheck scene: w h fx fy cx cy, then per splat: x y z ls0 ls1 ls2 qw qx qy qz "
@@ -308,7 +339,7 @@ namespace lfs::app {
                 const Conic2 q = conic_of(s0, i);
                 const double beta = ks::beta_from_raw(s0.shape[i]);
                 const double o = 1.0 / (1.0 + std::exp(-static_cast<double>(s0.opac[i])));
-                const double dmax = std::pow(2.0 * std::log(255.0 * o), 1.0 / beta);
+                const double dmax = g_cut > 0.0f ? edge_d(o, beta) : std::pow(2.0 * std::log(255.0 * o), 1.0 / beta);
                 const double r2 = (0.75 * dmax) * (0.75 * dmax);
                 for (int y = 0; y < s0.h; ++y)
                     for (int x = 0; x < s0.w; ++x) {
@@ -321,6 +352,27 @@ namespace lfs::app {
                             s0.w_img[(static_cast<size_t>(c) * s0.h + y) * s0.w + x] += static_cast<float>(
                                 1e-3 * bump * (1.0 + 0.6 * dx / 5.0 * (c == 1 ? -1.0 : 1.0) - 0.4 * dy / 5.0 + 0.3 * c));
                     }
+            }
+            if (g_cut > 0.0f) { // no weight within 0.1 (in d) of any splat's edge, where alpha jumps under the cut
+                int zeroed = 0;
+                for (int j = 0; j < s0.n; ++j) {
+                    const Conic2 q = conic_of(s0, j);
+                    const double o = 1.0 / (1.0 + std::exp(-static_cast<double>(s0.opac[j])));
+                    const double R = edge_d(o, ks::beta_from_raw(s0.shape[j]));
+                    for (int y = 0; y < s0.h; ++y)
+                        for (int x = 0; x < s0.w; ++x) {
+                            const double dx = x + 0.5 - q.mx, dy = y + 0.5 - q.my;
+                            const double d = std::sqrt(std::max(q.a * dx * dx + 2 * q.b * dx * dy + q.c * dy * dy, 0.0));
+                            if (std::abs(d - R) < 0.1)
+                                for (int c = 0; c < 3; ++c) {
+                                    float& wv = s0.w_img[(static_cast<size_t>(c) * s0.h + y) * s0.w + x];
+                                    zeroed += wv != 0.0f;
+                                    wv = 0.0f;
+                                }
+                        }
+                }
+                std::println("gradcheck under the cut C = {} ({}): {} weights zeroed near the splats' edges", g_cut,
+                             g_cut_dist ? "distance" : "exponent", zeroed);
             }
             const Run base = render(s0, true, 1);
             std::println("gradcheck scene: {} splats ({} visible), {}x{}; each block = one splat's parameter vector, relative error "
@@ -371,14 +423,149 @@ namespace lfs::app {
             std::println("{}", bad == 0 && !rels.empty() ? "SHAPE GRADCHECK OK" : "SHAPE GRADCHECK FAILED");
             return bad == 0 && !rels.empty() ? 0 : 1;
         }
+        // ------------------------------------------------------------------ cutcheck (LFQPLCYKD)
+        void set_cut(const float C, const bool dist) {
+            g_cut = C;
+            g_cut_dist = dist;
+            fr::set_splat_cutoff(C, dist);
+        }
+        void clear_cut() {
+            g_cut = 0.0f;
+            fr::set_splat_cutoff(0.0f);
+        }
+        double d_at(const Conic2& q, const int x, const int y) {
+            const double dx = x + 0.5 - q.mx, dy = y + 0.5 - q.my;
+            return std::sqrt(std::max(q.a * dx * dx + 2 * q.b * dx * dy + q.c * dy * dy, 0.0));
+        }
+
+        int run_cutcheck() {
+            int bad = 0;
+            const float cuts[] = {2.2360680f, 3.0f};
+            const float betas[] = {1.0f, 1.5f, 2.0f, 4.0f, 8.0f};
+            const float opacities[] = {0.9f, 0.03f};
+            // (1) coverage: one circular splat (sigma 7 px), centre off the pixel grid
+            std::println("(1) coverage: the lit pixels' largest d and the unlit pixels' smallest d bracket the expected edge "
+                         "(d = Mahalanobis distance in the dilated conic, float64 on the host); gated: the distance mode");
+            for (const float C : cuts)
+                for (const float o : opacities)
+                    for (const float beta : betas)
+                        for (int mode = 0; mode < 3; ++mode) { // 0 distance cut, 1 plain --max-std-dev (exponent), 2 no cut
+                            if (mode == 2 && C != cuts[0])
+                                continue;
+                            if (mode == 2)
+                                clear_cut();
+                            else
+                                set_cut(C, mode == 0);
+                            const std::vector<SplatSpec> one = {{80.3f, 79.6f, 2.0f, 7.0f, 7.0f, 0.0f, o, beta, 0.7f, 0.5f, 0.3f}};
+                            const Scene s = make_scene(one, 3u, 160, 160);
+                            const Run r = render(s, false, 1);
+                            const Conic2 q = conic_of(s, 0);
+                            const double ob = 1.0 / (1.0 + std::exp(-static_cast<double>(s.opac[0])));
+                            const double be = ks::beta_from_raw(s.shape[0]);
+                            const double R = edge_d(ob, be);
+                            const double contour = std::pow(2.0 * std::log(ob / min_alpha_now()), 1.0 / be);
+                            double lit_max = 0, unlit_min = 1e30;
+                            int lit = 0;
+                            for (int y = 0; y < s.h; ++y)
+                                for (int x = 0; x < s.w; ++x) {
+                                    const double d = d_at(q, x, y);
+                                    if (r.alpha[static_cast<size_t>(y) * s.w + x] > 0.0f) {
+                                        lit_max = std::max(lit_max, d);
+                                        ++lit;
+                                    } else
+                                        unlit_min = std::min(unlit_min, d);
+                                }
+                            const double tol = 2e-4 * std::max(R, 1.0);
+                            const bool ok = lit_max <= R + tol && unlit_min >= R - tol;
+                            if (mode == 0)
+                                bad += !ok;
+                            std::println("  {:<9} C {:.4f} o {:.2f} beta {:.4f}: contour {:7.4f}  expected edge {:7.4f}  lit {:5d} px, max d "
+                                         "{:7.4f}, unlit min d {:7.4f}  {}",
+                                         mode == 0 ? "distance" : mode == 1 ? "exponent" : "no cut", mode == 2 ? 0.0f : C, o, be, contour,
+                                         R, lit, lit_max, unlit_min, ok ? "ok" : (mode == 0 ? "FAIL" : "(mismatch)"));
+                        }
+            // (2) no gradient from beyond C: weight only pixels with C + 0.3 < d < contour - 0.3 of a beta 1 / 1.5 splat
+            std::println("(2) leak: loss weighted only where C + 0.3 < d < contour - 0.3; every analytic gradient must be exactly 0 "
+                         "under the distance cut (and is not without the cut)");
+            for (const float C : cuts)
+                for (const float beta : {1.0f, 1.5f}) {
+                    const std::vector<SplatSpec> one = {{80.3f, 79.6f, 2.0f, 6.0f, 4.0f, 30.0f, 0.9f, beta, 0.7f, 0.5f, 0.3f}};
+                    Scene s = make_scene(one, 5u, 160, 160);
+                    set_cut(C, true);
+                    const Conic2 q = conic_of(s, 0);
+                    const double ob = 1.0 / (1.0 + std::exp(-static_cast<double>(s.opac[0])));
+                    const double contour = std::pow(2.0 * std::log(ob / min_alpha_now()), 1.0 / ks::beta_from_raw(s.shape[0]));
+                    int nw = 0;
+                    for (int y = 0; y < s.h; ++y)
+                        for (int x = 0; x < s.w; ++x) {
+                            const double d = d_at(q, x, y);
+                            const bool in = d > C + 0.3 && d < contour - 0.3;
+                            nw += in;
+                            for (int c = 0; c < 3; ++c)
+                                if (!in)
+                                    s.w_img[(static_cast<size_t>(c) * s.h + y) * s.w + x] = 0.0f;
+                        }
+                    auto maxabs = [](const Run& r) {
+                        double m = 0;
+                        for (const auto* v : {&r.g_means, &r.g_scales, &r.g_rots, &r.g_opac, &r.g_sh0, &r.g_beta})
+                            for (const float g : *v)
+                                m = std::max(m, std::abs(static_cast<double>(g)));
+                        return m;
+                    };
+                    const Run on = render(s, true, 1);
+                    clear_cut();
+                    const Run off = render(s, true, 1);
+                    const double mon = maxabs(on), moff = maxabs(off);
+                    const bool ok = mon == 0.0 && moff > 0.0 && nw > 0;
+                    bad += !ok;
+                    std::println("  C {:.4f} beta {:.1f}: {} weighted px (contour {:.3f}); max |grad| distance cut {:.3g}, no cut {:.3g}  {}", C,
+                                 beta, nw, contour, mon, moff, ok ? "ok" : "FAIL");
+                }
+            // (3) beta = 2: the distance cut == plain --max-std-dev, unbound and bound (the shape kernels at raw 0)
+            std::println("(3) beta = 2: distance mode vs plain --max-std-dev on the refcheck scene with every beta = 2");
+            Scene s2 = make_scene(kRefSplats, 7u);
+            std::fill(s2.shape.begin(), s2.shape.end(), 0.0f);
+            auto same_bits = [](const std::vector<float>& x, const std::vector<float>& y) {
+                return x.size() == y.size() && std::memcmp(x.data(), y.data(), x.size() * sizeof(float)) == 0;
+            };
+            auto bw = [&](const Run& a, const Run& b) {
+                return same_bits(a.g_means, b.g_means) && same_bits(a.g_scales, b.g_scales) && same_bits(a.g_rots, b.g_rots) &&
+                       same_bits(a.g_opac, b.g_opac) && same_bits(a.g_sh0, b.g_sh0);
+            };
+            for (const float C : cuts) {
+                set_cut(C, false);
+                const Run e0 = render(s2, true, 0), e0b = render(s2, true, 0), e1 = render(s2, true, 1);
+                set_cut(C, true);
+                const Run d0 = render(s2, true, 0), d1 = render(s2, true, 1);
+                const bool fwd = same_bits(e0.img, d0.img) && same_bits(e0.alpha, d0.alpha) && same_bits(e1.img, d1.img) &&
+                                 same_bits(e1.alpha, d1.alpha) && same_bits(e0.img, d1.img);
+                bad += !fwd;
+                std::println("  C {:.4f}: forward image+alpha {} (distance vs exponent, unbound and bound); backward distance vs exponent: "
+                             "unbound {}, bound {} (exponent vs itself: {})",
+                             C, fwd ? "BIT-IDENTICAL" : "DIFFER", bw(e0, d0) ? "bit-identical" : "differs",
+                             bw(e1, d1) ? "bit-identical" : "differs", bw(e0, e0b) ? "bit-identical" : "differs (float atomics)");
+            }
+            clear_cut();
+            std::println("{}", bad == 0 ? std::string("CUTCHECK OK") : std::format("CUTCHECK FAILED ({} checks)", bad));
+            return bad == 0 ? 0 : 1;
+        }
     } // namespace
 
     int run_lfe_shape_tool(int argc, const char* const* argv) {
+        if (const char* c = std::getenv("LFE_SHAPE_CUT"); c != nullptr && std::atof(c) > 0.0) {
+            const char* m = std::getenv("LFE_SHAPE_CUT_MODE");
+            const bool dist = m == nullptr || std::string(m) != "exp";
+            set_cut(static_cast<float>(std::atof(c)), dist);
+            std::println("lfe-shape under the splat cut C = {} ({} mode, min alpha {:.6f})", g_cut, dist ? "distance" : "exponent",
+                         fr::kGameMinAlpha);
+        }
+        if (argc >= 3 && std::string(argv[2]) == "cutcheck")
+            return run_cutcheck();
         if (argc >= 4 && std::string(argv[2]) == "refcheck")
             return run_refcheck(argv[3]);
         if (argc >= 3 && std::string(argv[2]) == "gradcheck")
             return run_gradcheck();
-        std::println(stderr, "usage: LichtFeld-Studio lfe-shape refcheck <outdir> | gradcheck");
+        std::println(stderr, "usage: LichtFeld-Studio lfe-shape refcheck <outdir> | gradcheck | cutcheck");
         return 2;
     }
 

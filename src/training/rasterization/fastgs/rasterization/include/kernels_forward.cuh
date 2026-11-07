@@ -315,7 +315,7 @@ namespace fast_lfs::rasterization::kernels::forward {
         // --kernel-shape (LFQPLCYK): beta from the raw r; every bound below uses the alpha = 1/255 contour of
         // 1/2 d^beta as a d^2/2 radius (kshape::power_threshold; P itself for beta = 2 and without the shape)
         const float shape_beta = (SHAPE && shape_raw != nullptr) ? kshape::beta_from_raw(shape_raw[primitive_idx]) : 2.0f;
-        const float power_threshold = kshape::power_threshold(splat_power_threshold(output_opacity), shape_beta); // --max-std-dev: min(cut, alpha contour)
+        const float power_threshold = splat_bound_radius(kshape::power_threshold(splat_power_threshold(output_opacity), shape_beta)); // --max-std-dev: min(cut, alpha contour)
         const float power_threshold_factor = sqrtf(2.0f * power_threshold);
         float extent_x = fmaxf(power_threshold_factor * sqrtf(cov2d.x) - 0.5f, 0.0f);
         float extent_y = fmaxf(power_threshold_factor * sqrtf(cov2d.z) - 0.5f, 0.0f);
@@ -603,8 +603,8 @@ namespace fast_lfs::rasterization::kernels::forward {
         const float4 conic_opacity_loaded = active ? primitive_conic_opacity[work_idx] : make_float4(0.0f, 0.0f, 0.0f, c_splat_cutoff.min_alpha);
         const float3 conic = make_float3(conic_opacity_loaded);
         // --kernel-shape: the same contour radius the preprocess counted the tiles with (beta from the colour's w)
-        const float power_threshold_precomputed = kshape::power_threshold(
-            splat_power_threshold(conic_opacity_loaded.w), (shape_color != nullptr && active) ? shape_color[work_idx].w : 2.0f);
+        const float power_threshold_precomputed = splat_bound_radius(kshape::power_threshold(
+            splat_power_threshold(conic_opacity_loaded.w), (shape_color != nullptr && active) ? shape_color[work_idx].w : 2.0f));
         const float radius_sq = 2.0f * power_threshold_precomputed;
 
         uint current_write_offset = work_idx == 0 ? 0 : static_cast<uint>(primitive_offsets[work_idx - 1]);

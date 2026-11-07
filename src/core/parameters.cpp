@@ -939,7 +939,9 @@ namespace lfs::core {
                 return "loss_ycc_chroma_weight must be finite and >= 0, loss_ycc_luma_scale finite and > 0";
             if (!std::isfinite(max_std_dev) || max_std_dev < 0.0f || (max_std_dev > 0.0f && max_std_dev < 0.5f) || max_std_dev > 10.0f)
                 return std::format("max_std_dev must be 0 (off) or within [0.5, 10] (got {})", max_std_dev);
-            if (kernel_shape && max_std_dev > 0.0f)
+            if (max_std_dev_distance && !(max_std_dev > 0.0f))
+                return "--max-std-dev-distance needs --max-std-dev > 0 (the distance cap C)";
+            if (kernel_shape && max_std_dev > 0.0f && !max_std_dev_distance)
                 return "--kernel-shape cannot be combined with --max-std-dev: the game's cut is in standard deviations of a Gaussian, "
                        "which a beta != 2 kernel does not have (refused rather than redefined)";
             if (kernel_shape && gut)

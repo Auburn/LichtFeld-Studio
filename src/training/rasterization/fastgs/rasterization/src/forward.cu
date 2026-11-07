@@ -681,10 +681,12 @@ namespace fast_lfs::rasterization {
     namespace {
         SplatCutoffParams g_splat_cutoff{};
     }
-    SplatCutoffParams set_splat_cutoff(const float max_std_dev) {
+    SplatCutoffParams set_splat_cutoff(const float max_std_dev, const bool distance) {
         SplatCutoffParams p{};
         if (max_std_dev > 0.0f) {
             p.half_z2_max = 0.5f * max_std_dev * max_std_dev;
+            p.pt_cap = distance ? 3.0e38f : p.half_z2_max; // --max-std-dev-distance: the cap moves from P to the bounds
+            p.distance_cap = distance ? 1 : 0;
             p.min_alpha = kGameMinAlpha;
             p.min_alpha_rcp = 1.0f / kGameMinAlpha;
         }
@@ -694,5 +696,6 @@ namespace fast_lfs::rasterization {
         g_splat_cutoff = p;
         return p;
     }
+    SplatCutoffParams set_splat_cutoff(const float max_std_dev) { return set_splat_cutoff(max_std_dev, false); }
     SplatCutoffParams splat_cutoff() { return g_splat_cutoff; }
 } // namespace fast_lfs::rasterization

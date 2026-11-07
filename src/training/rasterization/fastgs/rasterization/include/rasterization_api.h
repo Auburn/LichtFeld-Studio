@@ -209,6 +209,9 @@ namespace fast_lfs::rasterization {
     // off (the original tests); X > 0: the game's cut, z <= X sigma and alpha >= 0.5/255. Returns what was set; throws on
     // a CUDA error. splat_cutoff() = the current setting.
     SplatCutoffParams set_splat_cutoff(float max_std_dev);
+    // --max-std-dev-distance (LFQPLCYKD): distance = true caps the d^2/2 radius of every bound at max_std_dev^2 / 2 AFTER the
+    // kernel-shape conversion (d <= max_std_dev AND alpha >= min_alpha for any beta; at beta = 2 the same as distance = false)
+    SplatCutoffParams set_splat_cutoff(float max_std_dev, bool distance);
     [[nodiscard]] SplatCutoffParams splat_cutoff();
 
     /// cudaPointerGetAttributes preflight call count (0 in Release/NDEBUG).

@@ -96,6 +96,7 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--loss-ycc-chroma-weight", "loss_ycc_chroma_weight", Float},
             OptimizationCliBinding{"--loss-ycc-luma-scale", "loss_ycc_luma_scale", Float},
             OptimizationCliBinding{"--max-std-dev", "max_std_dev", Float},
+            OptimizationCliBinding{"--max-std-dev-distance", "max_std_dev_distance", Bool},
             OptimizationCliBinding{"--kernel-shape", "kernel_shape", Bool},
             OptimizationCliBinding{"--kernel-shape-lr", "kernel_shape_lr", Float},
             OptimizationCliBinding{"--kernel-shape-start", "kernel_shape_start", Integer},
@@ -903,6 +904,7 @@ namespace {
             ::args::ValueFlag<float> loss_ycc_chroma_weight(training_group, "weight", lfs::core::args::optimization_cli_help("--loss-ycc-chroma-weight"), {"loss-ycc-chroma-weight"});
             ::args::ValueFlag<float> loss_ycc_luma_scale(training_group, "scale", lfs::core::args::optimization_cli_help("--loss-ycc-luma-scale"), {"loss-ycc-luma-scale"});
             ::args::ValueFlag<float> max_std_dev(training_group, "sigmas", lfs::core::args::optimization_cli_help("--max-std-dev"), {"max-std-dev"});
+            ::args::Flag max_std_dev_distance(training_group, "enabled", lfs::core::args::optimization_cli_help("--max-std-dev-distance"), {"max-std-dev-distance"});
             ::args::Flag kernel_shape(training_group, "enabled", lfs::core::args::optimization_cli_help("--kernel-shape"), {"kernel-shape"});
             ::args::ValueFlag<float> kernel_shape_lr(training_group, "lr", lfs::core::args::optimization_cli_help("--kernel-shape-lr"), {"kernel-shape-lr"});
             ::args::ValueFlag<int> kernel_shape_start(training_group, "iter", lfs::core::args::optimization_cli_help("--kernel-shape-start"), {"kernel-shape-start"});
@@ -1753,6 +1755,7 @@ namespace {
                                         loss_ycc_chroma_weight_val = cli_option_present({"--loss-ycc-chroma-weight"}) ? std::optional<float>(::args::get(loss_ycc_chroma_weight)) : std::optional<float>(),
                                         loss_ycc_luma_scale_val = cli_option_present({"--loss-ycc-luma-scale"}) ? std::optional<float>(::args::get(loss_ycc_luma_scale)) : std::optional<float>(),
                                         max_std_dev_val = cli_option_present({"--max-std-dev"}) ? std::optional<float>(::args::get(max_std_dev)) : std::optional<float>(),
+                                        max_std_dev_distance_flag = bool(max_std_dev_distance),
                                         kernel_shape_flag = bool(kernel_shape),
                                         kernel_shape_lr_val = cli_option_present({"--kernel-shape-lr"}) ? std::optional<float>(::args::get(kernel_shape_lr)) : std::optional<float>(),
                                         kernel_shape_start_val = cli_option_present({"--kernel-shape-start"}) ? std::optional<int>(::args::get(kernel_shape_start)) : std::optional<int>(),
@@ -1997,6 +2000,8 @@ namespace {
                 setVal(loss_ycc_chroma_weight_val, opt.loss_ycc_chroma_weight);
                 setVal(loss_ycc_luma_scale_val, opt.loss_ycc_luma_scale);
                 setVal(max_std_dev_val, opt.max_std_dev);
+                if (max_std_dev_distance_flag)
+                    opt.max_std_dev_distance = true;
                 if (kernel_shape_flag)
                     opt.kernel_shape = true;
                 setVal(kernel_shape_lr_val, opt.kernel_shape_lr);
@@ -2221,6 +2226,7 @@ namespace {
                 note_opt("loss_ycc_chroma_weight", loss_ycc_chroma_weight_val.has_value());
                 note_opt("loss_ycc_luma_scale", loss_ycc_luma_scale_val.has_value());
                 note_opt("max_std_dev", max_std_dev_val.has_value());
+                note_opt("max_std_dev_distance", max_std_dev_distance_flag);
                 note_opt("kernel_shape", kernel_shape_flag);
                 note_opt("kernel_shape_lr", kernel_shape_lr_val.has_value());
                 note_opt("kernel_shape_start", kernel_shape_start_val.has_value());

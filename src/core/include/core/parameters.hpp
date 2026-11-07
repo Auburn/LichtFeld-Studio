@@ -274,6 +274,11 @@ namespace lfs::core {
             // X standard deviations (Mahalanobis, in the dilated 2D covariance) and above alpha 0.5/255; the tile radius
             // shrinks to match. 0 = off (the trainer's own ~3-sigma, alpha >= 1/255 extent). The game: sqrt(5) = 2.2360680.
             float max_std_dev = 0.0f;
+            // --max-std-dev-distance (LFQPLCYKD): with --kernel-shape, the cut is on DISTANCE: a pixel takes part only when
+            // d <= max_std_dev AND alpha >= 0.5/255; every bound uses min(P_eff(beta), max_std_dev^2 / 2) as its d^2/2 radius
+            // (the game's per-splat radius min(contour, C)). Plain --max-std-dev caps ln(o / min_alpha) as a Gaussian power,
+            // which for beta != 2 cuts the exponent, not the distance. At beta = 2 both are the same. Needs --max-std-dev > 0.
+            bool max_std_dev_distance = false;
             // --kernel-shape (LFQPLCYK): a per-splat trainable kernel shape, alpha = o exp(-1/2 d^beta) with d the
             // Mahalanobis distance in the 2D conic and beta = 1 + 7 sigmoid(r - ln 6) in (1, 8), r = 0 -> beta = 2 (the
             // Gaussian) at the start; r has its own Adam (kernel_shape_lr) from iteration kernel_shape_start on.

@@ -181,6 +181,12 @@ namespace fast_lfs::rasterization {
         float half_z2_max = 3.0e38f;
         float min_alpha = config::min_alpha_threshold;
         float min_alpha_rcp = config::min_alpha_threshold_rcp;
+        // --max-std-dev-distance (LFQPLCYKD): the cap on log(opacity / min_alpha) as a power threshold (half_z2_max with
+        // plain --max-std-dev, no cap in the distance mode) and the distance mode itself (1: every bound takes
+        // min(P_eff(beta), half_z2_max) as its d^2/2 radius; P_eff = kshape::power_threshold of the UNCAPPED P). The per-pixel
+        // tests are the same in both modes: E = 1/2 d^beta <= P (the alpha floor) and d^2/2 <= half_z2_max.
+        float pt_cap = 3.0e38f;
+        int distance_cap = 0;
     };
     inline constexpr float kGameMinAlpha = 0.5f / 255.0f; // fpv-render gpu/mod.rs min_alpha
 } // namespace fast_lfs::rasterization

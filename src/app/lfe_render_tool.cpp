@@ -13,6 +13,7 @@
 //                              except an equidistant camera (OPENCV_FISHEYE with k1..k4 = 0, e.g. the game lens), which
 //                              is drawn through the polynomial path with the table switched off for that view
 //       --max-std-dev X        the game's splat cut (= the trainer's --max-std-dev; 0 = off)
+//       --max-std-dev-distance with --max-std-dev: the cut on distance (d <= X for any beta; = the trainer's flag)
 //       --bg R,G,B             solid background in [0, 1] (default 0,0,0); composited by the rasterizer
 //       --bg-cubemap DIR|NPY   a learned background cube (DIR/faces.npy, float32 [6, R, R, 3]); composited by the
 //                              rasterizer (splats + (1 - alpha) cube) through the same lens / rolling shutter as the
@@ -565,6 +566,9 @@ namespace lfs::app {
             Tensor opacity_backup;                // device clone of the raw opacity
         };
 
+        // --max-std-dev-distance (LFQPLCYKD): the trainer's distance cut (d <= C for any beta); set by both mains' flag
+        bool g_cut_distance = false;
+
         void load_model(LoadedModel& m, const fs::path& ply, int sh_degree, const std::string& lens_radial, float max_std_dev) {
             if (!lens_radial.empty()) {
                 m.table = lfs::training::load_radial_lens_table(lens_radial);
@@ -572,8 +576,14 @@ namespace lfs::app {
                 std::println("radial lens table: {}", lfs::training::active_radial_lens()->describe());
             }
             if (max_std_dev > 0.0f) {
-                fr::set_splat_cutoff(max_std_dev);
-                std::println("splat cut (--max-std-dev): {} sigma", max_std_dev);
+                if (g_cut_distance) {
+                    fr::set_splat_cutoff(max_std_dev, true);
+                    std::println("splat cut (--max-std-dev {} --max-std-dev-distance): distance cap ON, d <= {} for any beta, bounds min(contour, C)",
+                                 max_std_dev, max_std_dev);
+                } else {
+                    fr::set_splat_cutoff(max_std_dev);
+                    std::println("splat cut (--max-std-dev): {} sigma", max_std_dev);
+                }
             }
             auto loader = lfs::io::Loader::create();
             auto r = loader->load(ply);
@@ -591,7 +601,7 @@ namespace lfs::app {
             std::println("model {}: {} splats, SH degree {} (max {})", ply.string(), m.splat->size(),
                          m.splat->get_active_sh_degree(), m.max_sh);
             if (m.splat->_shape.is_valid()) { // LFQPLCYK: the PLY's `shape` property; every view / step draws each splat's beta
-                if (max_std_dev > 0.0f)
+                if (max_std_dev > 0.0f && !g_cut_distance)
                     throw std::runtime_error("--max-std-dev cannot be used with a per-splat kernel shape (the PLY's `shape` "
                                              "property): the cut is in standard deviations of a Gaussian");
                 std::println("per-splat kernel shape (PLY property shape): {} values", m.splat->_shape.numel());
@@ -1062,6 +1072,7 @@ namespace lfs::app {
                 else if (a == "--sh-degree") sh_degree = std::stoi(arg_value(i, argc, argv));
                 else if (a == "--lens-radial") lens_radial = arg_value(i, argc, argv);
                 else if (a == "--max-std-dev") max_std_dev = std::stof(arg_value(i, argc, argv));
+                else if (a == "--max-std-dev-distance") g_cut_distance = true;
                 else if (a == "--bg") {
                     const auto v = parse_floats(arg_value(i, argc, argv));
                     if (v.size() != 3) throw std::runtime_error("--bg R,G,B");
@@ -1426,6 +1437,7 @@ namespace lfs::app {
             for (int i = 2; i < argc; ++i) {
                 const std::string a = argv[i];
                 if (a == "--max-std-dev") max_std_dev = std::stof(arg_value(i, argc, argv));
+                else if (a == "--max-std-dev-distance") g_cut_distance = true;
                 else if (a == "--sh-degree") sh_degree = std::stoi(arg_value(i, argc, argv));
                 else pos.push_back(a);
             }

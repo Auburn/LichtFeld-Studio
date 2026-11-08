@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cuda_runtime.h>
 #include <print>
@@ -205,6 +206,12 @@ namespace lfs::app {
         }
 
         int run_gradcheck() {
+            // LFQPLCYKMOD: LFE_FOOTPRINT_CUT=C runs the check under the game's distance cut (--max-std-dev C --max-std-dev-distance);
+            // the footprint's value and gradient do not depend on it (they are the game's quad), the forward's visibility could
+            if (const char* c = std::getenv("LFE_FOOTPRINT_CUT"); c != nullptr && std::atof(c) > 0.0) {
+                const auto cut = fr::set_splat_cutoff(static_cast<float>(std::atof(c)), true);
+                std::println("splat cut on distance: C = {} (d^2/2 <= {}, min alpha {:.6f})", c, cut.half_z2_max, cut.min_alpha);
+            }
             //            u      v      z     s1     s2   ang    o      beta  tilt
             const std::vector<SplatSpec> specs = {
                 {30.0f, 30.0f, 2.0f, 3.0f, 2.0f, 20.0f, 0.95f, 1.3f, 25.0f},   // 0 long tails, opaque (reach = the cut)

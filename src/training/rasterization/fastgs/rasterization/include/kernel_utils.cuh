@@ -1286,7 +1286,7 @@ namespace fast_lfs::rasterization::kernels {
         if (!(opacity >= c_splat_cutoff.min_alpha))
             return false;
         // --max-std-dev: capped by the cut; --kernel-shape: the 1/2 d^beta = P contour as a d^2/2 radius
-        const float power_threshold = kshape::power_threshold(splat_power_threshold(opacity), shape_beta);
+        const float power_threshold = splat_bound_radius(kshape::power_threshold(splat_power_threshold(opacity), shape_beta));
         // Continuous box of pixel centers in mean-relative coordinates.
         const float x0 = (sub_x0 + 0.5f) - mean2d.x;
         const float x1 = (sub_x0 + sub_w - 0.5f) - mean2d.x;

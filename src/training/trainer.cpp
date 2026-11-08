@@ -3576,7 +3576,14 @@ namespace lfs::training {
             // --max-std-dev (LFQPLCY): the game's splat cut in the FastGS forward and backward (process-wide; reset when off)
             {
                 const float X = params.optimization.max_std_dev;
-                const auto cut = fast_lfs::rasterization::set_splat_cutoff(X);
+                const bool dist = params.optimization.max_std_dev_distance;
+                const auto cut = dist ? fast_lfs::rasterization::set_splat_cutoff(X, true) : fast_lfs::rasterization::set_splat_cutoff(X);
+                if (X > 0.0f && dist)
+                    LOG_INFO("Splat cutoff on distance (--max-std-dev-distance): ON, C = {:.7f}: a pixel takes part only when "
+                             "d <= C (d^2/2 <= {:.7f}) AND alpha = opacity exp(-1/2 d^beta) >= {:.6f}; every bound (tiles, exact "
+                             "tile count, pixel box, warp sub-tile, backward) uses min(P_eff(beta), C^2/2) as its d^2/2 radius "
+                             "(per-splat radius min(alpha contour, C)); --kernel-shape {}",
+                             X, cut.half_z2_max, cut.min_alpha, params.optimization.kernel_shape ? "on" : "off");
                 if (X > 0.0f)
                     LOG_INFO("Splat cutoff (--max-std-dev): {:.7f} sigma, as the game renderer (fpv-render) draws: a pixel takes part in a "
                              "splat only when z^2 = d^T Sigma^-1 d <= {:.7f} (Sigma = its EWA 2D covariance through the camera's lens "

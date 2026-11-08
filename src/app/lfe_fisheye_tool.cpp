@@ -89,6 +89,16 @@ namespace lfs::app {
                 }
                 std::println("radial lens table: {}", lfs::training::active_radial_lens()->describe());
             }
+            // LFQPLCYKD: LFS_MAX_STD_DEV = the trainer's --max-std-dev (LFS_MAX_STD_DEV_DISTANCE=1: + --max-std-dev-distance)
+            if (const char* ms = std::getenv("LFS_MAX_STD_DEV"); ms != nullptr && std::atof(ms) > 0.0) {
+                const char* md = std::getenv("LFS_MAX_STD_DEV_DISTANCE");
+                const bool dist = md != nullptr && *md && std::string(md) != "0";
+                const auto cut = fast_lfs::rasterization::set_splat_cutoff(static_cast<float>(std::atof(ms)), dist);
+                std::println("splat cut (LFS_MAX_STD_DEV): {} sigma, {} (d^2/2 <= {}, min alpha {:.6f})", ms,
+                             dist ? "distance cap ON (--max-std-dev-distance): d <= C for any beta" : "plain --max-std-dev", cut.half_z2_max,
+                             cut.min_alpha);
+            }
+            const bool raster_stats = std::getenv("LFS_RASTER_STATS") != nullptr && std::string(std::getenv("LFS_RASTER_STATS")) != "0";
             auto loader = lfs::io::Loader::create();
             auto load_result = loader->load(ply);
             if (!load_result) {
@@ -134,7 +144,20 @@ namespace lfs::app {
                               name, {}, {}, w, h, uid++);
                 lfs::training::RenderOutput out;
                 try {
-                    out = lfs::training::fast_rasterize(camera, model, background);
+                    if (raster_stats) { // fast_rasterize's own forward call, with the context read before it is released
+                        auto result = lfs::training::fast_rasterize_forward(camera, model, background, 0, 0, 0, 0, false, {}, false,
+                                                                            /*render_depth=*/true, 1.0f, /*update_screen_share=*/false);
+                        if (!result)
+                            throw lfs::Exception(std::move(result.error()));
+                        out = std::move(result->first);
+                        const auto& fc = result->second.forward_ctx;
+                        const double px = static_cast<double>(w) * h;
+                        std::println("raster stats {}: visible {} splats, tile intersections {}, tile-list splats per pixel {:.2f} "
+                                     "(intersections x 256 / pixels: the splats a pixel's tile walks before early stop)",
+                                     name, fc.n_visible, fc.n_instances, px > 0 ? fc.n_instances * 256.0 / px : 0.0);
+                        result->second.release_forward_context();
+                    } else
+                        out = lfs::training::fast_rasterize(camera, model, background);
                 } catch (const std::exception& e) {
                     std::println(stderr, "render {} failed: {}", name, e.what());
                     return 1;

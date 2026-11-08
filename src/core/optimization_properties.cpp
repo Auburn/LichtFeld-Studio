@@ -396,6 +396,11 @@ namespace lfs::core::param {
             .ui_step(0.1)
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .bool_prop(&OptimizationParameters::max_std_dev_distance,
+                       "max_std_dev_distance", "Splat Cutoff on Distance", d.max_std_dev_distance,
+                       "With --max-std-dev and --kernel-shape: cut every splat at Mahalanobis distance d <= max_std_dev (and alpha >= 0.5/255), the bounds at min(alpha contour, max_std_dev), as a game drawing per-splat radius min(contour, C) would; identical to --max-std-dev for the Gaussian")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .bool_prop(&OptimizationParameters::kernel_shape,
                        "kernel_shape", "Kernel Shape (per splat)", d.kernel_shape,
                        "Per-splat trainable kernel shape (a generalized Gaussian): alpha = opacity x exp(-1/2 d^beta), d the Mahalanobis distance in the 2D conic, beta = 1 + 7 sigmoid(r - ln 6) in [1, 8] learned per splat from 2 (the Gaussian); beta > 2 flat top and sharp edge, beta < 2 a peak with long tails; the tile extent follows (2 ln(255 opacity))^(1/beta); exported as the PLY vertex property 'shape'; standard rasterizer, MRNF; not with --max-std-dev, --enable-mip or --enable-sparsity")

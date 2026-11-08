@@ -188,6 +188,13 @@ namespace lfs::training {
         float* erank_reg_loss_out = nullptr;
         float* sh_rest_reg_loss_out = nullptr;
         float* dc_reg_loss_out = nullptr;
+        // --loss-footprint (LFQPLCYKMO): see FusedAdamSettings (fused_adam_types.h). weight 0 = off.
+        float footprint_weight = 0.0f;
+        bool footprint_opacity = false;
+        float footprint_max_px_per_fx = 0.0f;
+        const float* footprint_shape_raw = nullptr;
+        float* footprint_loss_out = nullptr;
+        float* footprint_area_out = nullptr;
         // Optional edge guidance folded into the main blend backward. The map
         // is a median-normalized row-major float32 [H,W], and the destination
         // is a zeroed float32 [N] per-view scratch vector.

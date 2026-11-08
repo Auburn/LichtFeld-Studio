@@ -976,6 +976,12 @@ namespace lfs::training {
         core::Tensor fused_scale_reg_loss_;
         core::Tensor fused_opacity_reg_loss_;
         core::Tensor fused_opacity_binarize_loss_;
+        // --loss-footprint (LFQPLCYKMO): [loss, mean footprint per pixel] of the logged step (filled in the fused backward)
+        core::Tensor fused_footprint_stats_;
+        // --loss-footprint-fraction: the samples before the start and the lambda set from them (< 0: not set yet)
+        double footprint_cal_loss_sum_ = 0.0, footprint_cal_area_sum_ = 0.0;
+        int footprint_cal_n_ = 0;
+        float footprint_lambda_auto_ = -1.0f;
         core::Tensor fused_erank_reg_loss_;
         core::Tensor fused_dc_reg_loss_;
         core::Tensor fused_sh_rest_reg_loss_;

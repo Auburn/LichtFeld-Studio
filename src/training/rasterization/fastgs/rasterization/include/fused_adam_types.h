@@ -67,6 +67,16 @@ namespace fast_lfs::rasterization {
         float* erank_reg_loss_out = nullptr;
         float* sh_rest_reg_loss_out = nullptr;
         float* dc_reg_loss_out = nullptr;
+        // --loss-footprint (LFQPLCYKMO; lfs/training/game_footprint.cuh): lambda x (1 / (W H)) x the sum over the view's visible
+        // splats of the quad area the game draws for each. footprint_weight = lambda (ramped; 0 = off: nothing below is read).
+        // Gradient into the log-scales through the projected 2D covariance; into the raw opacity through the reach only with
+        // footprint_opacity (shaped splats whose alpha-floor contour lies inside the cut). Beta, means and rotations get none.
+        float footprint_weight = 0.0f;
+        bool footprint_opacity = false;
+        float footprint_max_px_per_fx = 0.0f;           // the game's per-axis quad cap / the view's fx (kGameMaxPixelRadiusPerFx)
+        const float* footprint_shape_raw = nullptr;     // --kernel-shape raw r per splat (beta); null = every splat a Gaussian
+        float* footprint_loss_out = nullptr;            // optional: += lambda x sum A / (W H)
+        float* footprint_area_out = nullptr;            // optional: += sum A / (W H) (mean splats drawn per pixel)
         bool per_splat_mean_step = false;
         float mean_step_median_extent = 0.0f;
         const bool* mean_step_far_mask = nullptr;

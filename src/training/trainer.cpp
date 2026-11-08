@@ -50,6 +50,7 @@
 #include "lfs/training/morton_reorder.hpp"
 #include "lfs/training/perf_bench.hpp"
 #include "lfs/training/screen_share.cuh"
+#include "lfs/training/game_footprint.cuh"
 #include "lfs/training/sh_value_codec.hpp"
 #include "lfs/training/vram_ledger.hpp"
 #include "losses/losses.hpp"
@@ -3799,6 +3800,26 @@ namespace lfs::training {
                                "never shrunk)"
                              : "longest axis (screen_share_axis max)");
             }
+            if (params.optimization.loss_footprint > 0.0f || params.optimization.loss_footprint_fraction > 0.0f) {
+                // LFQPLCYKMO: the game's draw cost (lfs/training/game_footprint.cuh; fused into the FastGS preprocess backward)
+                LOG_INFO("Footprint loss (--loss-footprint, LFQPLCYKMO): lambda {} x the mean number of splats the game draws per "
+                         "pixel of the view (each splat's fpv-render quad 4 min(M, R sqrt(l1)) min(M, R sqrt(l2)), M = 512 px of the "
+                         "119-deg 2560 game view = {} x fx, R = sqrt5 for a Gaussian, min(sqrt5, (2 ln(510 o))^(1/beta)) for a "
+                         "shaped splat{}); from iteration {}, ramped in over {} iterations; gradient into the log-scales{}; beta, "
+                         "means and rotations get none; logged every {} iterations",
+                         params.optimization.loss_footprint_fraction > 0.0f
+                             ? std::format("set at the start so the term starts at {} of the image loss (--loss-footprint-fraction; "
+                                           "the footprint measured without a gradient over the 2000 iterations before)",
+                                           params.optimization.loss_footprint_fraction)
+                             : std::format("{}", params.optimization.loss_footprint),
+                         lfs::training::kGameMaxPixelRadiusPerFx,
+                         params.optimization.kernel_shape ? " (--kernel-shape: each splat's own beta)" : " (no --kernel-shape: all Gaussians)",
+                         params.optimization.loss_footprint_start, params.optimization.loss_footprint_ramp,
+                         params.optimization.loss_footprint_opacity
+                             ? " and the raw opacity through the reach (--loss-footprint-opacity)"
+                             : " only (opacity gradient off)",
+                         500); // = kExtraLossLogInterval (defined further down)
+            }
             if (params.optimization.distortion_weight > 0.0f) {
                 if (params.optimization.gut)
                     LOG_WARN("Depth distortion loss needs the standard rasterizer; ignored with --gut");
@@ -7176,6 +7197,12 @@ namespace lfs::training {
                 lfs::core::Tensor fused_scale_reg_loss_gpu;
                 lfs::core::Tensor fused_opacity_reg_loss_gpu;
                 lfs::core::Tensor fused_opacity_binarize_loss_gpu;
+                // --loss-footprint (LFQPLCYKMO): this step's weight / ramp, whether its scalars are bound (log cadence), and the
+                // forward's tile-list size for the same log line
+                float footprint_weight_now = 0.0f, footprint_ramp_now = 0.0f;
+                bool footprint_logged = false;
+                long long footprint_n_instances = -1, footprint_n_visible = -1;
+                int footprint_w = 0, footprint_h = 0;
                 // Depth distortion (standard rasterizer, iterations with a Gaussian backward), from
                 // distortion_start on. The forward accumulates the loss; the backward its gradients.
                 const bool distortion_active = run_fastgs_gaussian_backward && !in_popspa &&
@@ -7318,6 +7345,48 @@ namespace lfs::training {
                             fused_extra_gradients.opacity_binarize_loss_out =
                                 fused_opacity_binarize_loss_.ptr<float>();
                             fused_opacity_binarize_loss_gpu = fused_opacity_binarize_loss_;
+                        }
+                        // --loss-footprint (LFQPLCYKMO): lambda x (the ramp from loss_footprint_start over loss_footprint_ramp);
+                        // the loss / mean-footprint scalars are bound at the log cadence only (also before the start, to log
+                        // the footprint the loss will meet)
+                        if ((step_params.loss_footprint > 0.0f || step_params.loss_footprint_fraction > 0.0f) && !step_params.gut) {
+                            const size_t fs = step_params.loss_footprint_start, fr = step_params.loss_footprint_ramp;
+                            const size_t it = static_cast<size_t>(std::max(iter, 0));
+                            const bool auto_lambda = step_params.loss_footprint_fraction > 0.0f;
+                            if (auto_lambda && it >= fs && footprint_lambda_auto_ < 0.0f && footprint_cal_n_ > 0 &&
+                                footprint_cal_area_sum_ > 0.0) {
+                                footprint_lambda_auto_ = static_cast<float>(step_params.loss_footprint_fraction * footprint_cal_loss_sum_ /
+                                                                            footprint_cal_area_sum_);
+                                LOG_INFO("iter {}: footprint loss lambda set to {:.6g} = fraction {} x image + other losses {:.6g} / mean "
+                                         "footprint {:.4g} splats drawn per pixel (means of {} samples before iteration {})",
+                                         iter, footprint_lambda_auto_, step_params.loss_footprint_fraction,
+                                         footprint_cal_loss_sum_ / footprint_cal_n_, footprint_cal_area_sum_ / footprint_cal_n_,
+                                         footprint_cal_n_, fs);
+                            }
+                            const float lambda_now = auto_lambda ? std::max(footprint_lambda_auto_, 0.0f) : step_params.loss_footprint;
+                            if (it >= fs) {
+                                footprint_ramp_now = fr == 0 ? 1.0f
+                                                             : std::min(1.0f, static_cast<float>(it - fs + 1) / static_cast<float>(fr));
+                                footprint_weight_now = lambda_now * footprint_ramp_now;
+                            }
+                            fused_extra_gradients.footprint_weight = footprint_weight_now;
+                            fused_extra_gradients.footprint_opacity = step_params.loss_footprint_opacity;
+                            fused_extra_gradients.footprint_max_px_per_fx = lfs::training::kGameMaxPixelRadiusPerFx;
+                            fused_extra_gradients.footprint_shape_raw =
+                                (model._shape.is_valid() && model._shape.numel() == static_cast<size_t>(model.size()))
+                                    ? model._shape.ptr<float>()
+                                    : nullptr;
+                            // bound at the log cadence, and every 50 iterations in the auto-lambda window (2000 iterations before
+                            // the start, until lambda is set): the calibration's samples
+                            const bool cal_window = auto_lambda && footprint_lambda_auto_ < 0.0f && it + 2000 >= fs;
+                            if (iter % kExtraLossLogInterval == 0 || (cal_window && iter % 50 == 0)) {
+                                if (!fused_footprint_stats_.is_valid())
+                                    fused_footprint_stats_ = lfs::core::Tensor::zeros({2}, lfs::core::Device::CUDA);
+                                fused_footprint_stats_.zero_();
+                                fused_extra_gradients.footprint_loss_out = fused_footprint_stats_.ptr<float>();
+                                fused_extra_gradients.footprint_area_out = fused_footprint_stats_.ptr<float>() + 1;
+                                footprint_logged = true;
+                            }
                         }
                     } else {
                         // Freeze / non-backward FastGS iterations: keep legacy loss-only
@@ -8963,6 +9032,12 @@ namespace lfs::training {
                                     std::unique_lock<std::shared_mutex> model_write_lock(render_mutex_, std::defer_lock);
                                     if (strategy_->is_refining(iter))
                                         model_write_lock.lock();
+                                    if (footprint_logged) {
+                                        footprint_n_instances = fast_ctx->forward_ctx.n_instances;
+                                        footprint_n_visible = fast_ctx->forward_ctx.n_visible;
+                                        footprint_w = fast_ctx->width;
+                                        footprint_h = fast_ctx->height;
+                                    }
                                     fast_rasterize_backward(*fast_ctx, raster_grad, strategy_->get_model(),
                                                             gaussian_optimizer, tile_grad_alpha,
                                                             use_pixel_error_densification ? tile_error_map : lfs::core::Tensor{},
@@ -9126,6 +9201,33 @@ namespace lfs::training {
                                          binarize_loss / opacity_binarize_weight, loss_before);
                             }
                             loss_tensor_gpu = loss_tensor_gpu + fused_opacity_binarize_loss_gpu;
+                        }
+                    }
+
+                    if (footprint_logged && fused_footprint_stats_.is_valid()) {
+                        // Synchronous readback at the log cadence only. The term is not added to the reported loss (the
+                        // progress bar stays the image + other losses, comparable with runs without it).
+                        const float loss_before = loss_tensor_gpu.is_valid() ? loss_tensor_gpu.item<float>() : 0.0f;
+                        const auto fp = fused_footprint_stats_.cpu().contiguous();
+                        const float fp_loss = fp.ptr<float>()[0], fp_area = fp.ptr<float>()[1];
+                        const double tiles = static_cast<double>((footprint_w + 15) / 16) * static_cast<double>((footprint_h + 15) / 16);
+                        if (iter % kExtraLossLogInterval == 0)
+                        LOG_INFO("iter {}: footprint loss {:.6g} (weight {:.6g} = lambda {} x ramp {:.3f}); mean footprint {:.4g} "
+                                 "splats drawn per pixel (the game's quads over the view's {} visible splats, {}x{}); tile "
+                                 "intersections {} = {:.2f} tile-list splats per pixel; image + other losses {:.6g} (term = {:.2f}% of it)",
+                                 iter, fp_loss, footprint_weight_now,
+                                 step_params.loss_footprint_fraction > 0.0f ? std::max(footprint_lambda_auto_, 0.0f) : step_params.loss_footprint,
+                                 footprint_ramp_now, fp_area,
+                                 footprint_n_visible, footprint_w, footprint_h, footprint_n_instances,
+                                 tiles > 0 ? static_cast<double>(footprint_n_instances) / tiles : 0.0, loss_before,
+                                 loss_before > 0.0f ? 100.0 * fp_loss / loss_before : 0.0);
+                        // --loss-footprint-fraction: the samples of the 2000 iterations before the start (every 50 iterations)
+                        const size_t fs = step_params.loss_footprint_start, it = static_cast<size_t>(std::max(iter, 0));
+                        if (step_params.loss_footprint_fraction > 0.0f && footprint_lambda_auto_ < 0.0f && fp_area > 0.0f &&
+                            loss_before > 0.0f && it + 2000 >= fs) {
+                            footprint_cal_loss_sum_ += loss_before;
+                            footprint_cal_area_sum_ += fp_area;
+                            ++footprint_cal_n_;
                         }
                     }
 

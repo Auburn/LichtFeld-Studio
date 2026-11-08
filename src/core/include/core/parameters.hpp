@@ -281,6 +281,20 @@ namespace lfs::core {
             bool kernel_shape = false;
             float kernel_shape_lr = 0.005f;
             size_t kernel_shape_start = 0;
+            // --loss-footprint LAMBDA (LFQPLCYKMO; training/include/lfs/training/game_footprint.cuh): penalise the game's draw cost,
+            // LAMBDA x the mean number of splats the game draws per pixel of the view (the sum over the view's visible splats of
+            // the quad fpv-render draws, 4 min(512 px, R sqrt(l1)) min(512 px, R sqrt(l2)), R = sqrt 5 for a Gaussian and
+            // min(sqrt 5, (2 ln(510 o))^(1/beta)) for a shaped splat, over W x H). Gradient into the log-scales; with
+            // loss_footprint_opacity also into the opacity through the reach (shaped splats). From loss_footprint_start, ramped in
+            // linearly over loss_footprint_ramp iterations (both scaled by --steps-scaler, as distortion_start). 0 = off.
+            float loss_footprint = 0.0f;
+            size_t loss_footprint_start = 6000;
+            size_t loss_footprint_ramp = 2000;
+            bool loss_footprint_opacity = false;
+            // --loss-footprint-fraction F (instead of LAMBDA): lambda is set at loss_footprint_start so that the term starts at F of
+            // the image loss: F x mean(image + other losses) / mean(footprint), over the log-cadence samples in the 2000 iterations
+            // before the start (the footprint is measured there with no gradient). 0 = use loss_footprint as given.
+            float loss_footprint_fraction = 0.0f;
             float min_opacity = 0.005f;
             size_t refine_every = 100;
             size_t start_refine = 500;

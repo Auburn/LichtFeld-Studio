@@ -84,6 +84,12 @@ namespace lfs::training {
         fused_adam.erank_reg_loss_out = fused_extra_gradients.erank_reg_loss_out;
         fused_adam.sh_rest_reg_loss_out = fused_extra_gradients.sh_rest_reg_loss_out;
         fused_adam.dc_reg_loss_out = fused_extra_gradients.dc_reg_loss_out;
+        fused_adam.footprint_weight = fused_extra_gradients.footprint_weight;
+        fused_adam.footprint_opacity = fused_extra_gradients.footprint_opacity;
+        fused_adam.footprint_max_px_per_fx = fused_extra_gradients.footprint_max_px_per_fx;
+        fused_adam.footprint_shape_raw = fused_extra_gradients.footprint_shape_raw;
+        fused_adam.footprint_loss_out = fused_extra_gradients.footprint_loss_out;
+        fused_adam.footprint_area_out = fused_extra_gradients.footprint_area_out;
         fused_adam.means = convert_param(optimizer_fused.means);
         fused_adam.scaling = convert_param(optimizer_fused.scaling);
         fused_adam.rotation = convert_param(optimizer_fused.rotation);

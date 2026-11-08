@@ -573,6 +573,8 @@ namespace lfs::core {
             grow_until_iter = apply(grow_until_iter);
             opacity_binarize_start = apply(opacity_binarize_start);
             distortion_start = apply(distortion_start);
+            loss_footprint_start = apply(loss_footprint_start);
+            loss_footprint_ramp = apply(loss_footprint_ramp);
             rs_learn_start = apply(rs_learn_start);
             rs_motion_start = apply(rs_motion_start);
             pose_opt_start = apply(pose_opt_start);
@@ -954,6 +956,18 @@ namespace lfs::core {
                 return std::format("kernel_shape_lr must be within [0, 1] (got {})", kernel_shape_lr);
             if (kernel_shape_start > MAX_ITERATION_VALUE)
                 return std::format("kernel_shape_start must be within [0, {}]", MAX_ITERATION_VALUE);
+            if (!std::isfinite(loss_footprint) || loss_footprint < 0.0f || loss_footprint > 10.0f)
+                return std::format("loss_footprint must be within [0, 10] (got {})", loss_footprint);
+            if (loss_footprint > 0.0f && gut)
+                return "--loss-footprint is implemented for the standard (FastGS) rasterizer, not --gut";
+            if (!std::isfinite(loss_footprint_fraction) || loss_footprint_fraction < 0.0f || loss_footprint_fraction > 10.0f)
+                return std::format("loss_footprint_fraction must be within [0, 10] (got {})", loss_footprint_fraction);
+            if (loss_footprint_fraction > 0.0f && loss_footprint > 0.0f)
+                return "give --loss-footprint LAMBDA or --loss-footprint-fraction F, not both";
+            if (loss_footprint_fraction > 0.0f && gut)
+                return "--loss-footprint-fraction is implemented for the standard (FastGS) rasterizer, not --gut";
+            if (loss_footprint_start > MAX_ITERATION_VALUE || loss_footprint_ramp > MAX_ITERATION_VALUE)
+                return std::format("loss_footprint_start / loss_footprint_ramp must be within [0, {}]", MAX_ITERATION_VALUE);
             if (max_std_dev > 0.0f && gut)
                 return "--max-std-dev applies to the standard rasterizer (not --gut)";
             if (max_std_dev > 0.0f && mip_filter)

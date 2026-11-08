@@ -10,6 +10,7 @@
 #include "kernel_utils.cuh"
 #include "lfs/core/warp_reduce.cuh"
 #include "lfs/training/effective_rank.cuh"
+#include "lfs/training/game_footprint.cuh"
 #include "lfs/training/mean_step_scale.cuh"
 #include "rasterization_config.h"
 #include "pose_gradient.cuh"
@@ -204,6 +205,8 @@ namespace fast_lfs::rasterization::kernels::backward {
         float sh0_grads[3] = {0.0f, 0.0f, 0.0f};
         float scale_grads[3] = {0.0f, 0.0f, 0.0f};
         float opacity_grads[1] = {0.0f};
+        // --loss-footprint (LFQPLCYKMO): this thread's lambda A / (W H) and A / (W H), block-reduced before the Adam steps
+        float footprint_loss_local = 0.0f, footprint_area_local = 0.0f;
         float3 dL_dmean3d_from_color = make_float3(0.0f, 0.0f, 0.0f);
 
         const uint work_idx = in_range ? primitive_work_indices[primitive_idx] : 0u;
@@ -659,6 +662,44 @@ namespace fast_lfs::rasterization::kernels::backward {
             if constexpr (!DISABLED_FEATURES)
                 add_flatten_regularization_grads(fused_adam, fused_adam.scaling, scale_base, scale_grads);
 
+            // --loss-footprint (LFQPLCYKMO; lfs/training/game_footprint.cuh): the quad the game draws for this splat in this view,
+            // A = 4 min(M, R sqrt(l1)) min(M, R sqrt(l2)) of the dilated 2D covariance (a0, b0, c0: before any motion-blur smear,
+            // which the game does not draw), R the game's reach, M its 512 px cap in this view's pixels. The loss is
+            // lambda x A / (W H) summed over the view; its gradient goes to the log-scales only: a0 = sum_k v_k u_k1^2,
+            // b0 = sum_k v_k u_k1 u_k2, c0 = sum_k v_k u_k2^2 with u_k = (J W) r_k (r_k the rotation's column k, v_k = s_k^2), so
+            // dA / dlog s_k = 2 v_k (A_a u_k1^2 + A_b u_k1 u_k2 + A_c u_k2^2). With footprint_opacity also dA / d(raw opacity)
+            // through the reach. Off (weight 0, no outputs bound): nothing here runs.
+            if constexpr (!DISABLED_FEATURES) {
+                if (fused_adam.footprint_weight > 0.0f || fused_adam.footprint_area_out != nullptr) {
+                    const float fp_beta = fused_adam.footprint_shape_raw != nullptr
+                                              ? kshape::beta_from_raw(fused_adam.footprint_shape_raw[primitive_idx])
+                                              : 2.0f;
+                    const float fp_opacity = sigmoid(raw_opacities[primitive_idx]);
+                    const lfs::training::GameFootprint fp = lfs::training::game_footprint(
+                        a0, b0, c0, fp_opacity, fp_beta, fused_adam.footprint_max_px_per_fx * fx,
+                        fused_adam.footprint_opacity && fused_adam.footprint_weight > 0.0f);
+                    const float inv_px = 1.0f / (w * h);
+                    footprint_area_local = fp.area * inv_px;
+                    footprint_loss_local = fused_adam.footprint_weight * footprint_area_local;
+                    if (fused_adam.footprint_weight > 0.0f && fp.area > 0.0f) {
+                        const float coef = fused_adam.footprint_weight * inv_px;
+                        const float3 rc[3] = {make_float3(rotation.m11, rotation.m21, rotation.m31),
+                                              make_float3(rotation.m12, rotation.m22, rotation.m32),
+                                              make_float3(rotation.m13, rotation.m23, rotation.m33)};
+                        const float vk[3] = {variance.x, variance.y, variance.z};
+                        const float lsk[3] = {raw_scale.x, raw_scale.y, raw_scale.z};
+                        for (int k = 0; k < 3; ++k) {
+                            const float u1 = dot(jw_r1, rc[k]), u2 = dot(jw_r2, rc[k]);
+                            const float g = 2.0f * vk[k] * (fp.d_a * u1 * u1 + fp.d_b * u1 * u2 + fp.d_c * u2 * u2);
+                            if (lsk[k] < config::max_raw_scale)
+                                scale_grads[k] += coef * g;
+                        }
+                        if (fused_adam.footprint_opacity)
+                            opacity_grads[0] += coef * fp.d_raw_opacity;
+                    }
+                }
+            }
+
             // raw rotation gradient
             mat3x3 dL_drotation = {
                 2.0f * (rotation_scaled.m11 * dL_dcov3d.m11 + rotation_scaled.m21 * dL_dcov3d.m12 + rotation_scaled.m31 * dL_dcov3d.m13),
@@ -838,6 +879,20 @@ namespace fast_lfs::rasterization::kernels::backward {
         if constexpr (POSE) {
             if (pose_grad != nullptr)
                 pose::block_add6(pose_acc, pose_grad);
+        }
+
+        // --loss-footprint (LFQPLCYKMO): the view's loss and mean footprint per pixel, only when the caller binds the scalars
+        if constexpr (!DISABLED_FEATURES) {
+            if (fused_adam.footprint_loss_out != nullptr) {
+                const float block_sum = lfs::core::warp_ops::block_reduce_sum(footprint_loss_local);
+                if (threadIdx.x == 0 && block_sum != 0.0f)
+                    atomicAdd(fused_adam.footprint_loss_out, block_sum);
+            }
+            if (fused_adam.footprint_area_out != nullptr) {
+                const float block_sum = lfs::core::warp_ops::block_reduce_sum(footprint_area_local);
+                if (threadIdx.x == 0 && block_sum != 0.0f)
+                    atomicAdd(fused_adam.footprint_area_out, block_sum);
+            }
         }
 
         if constexpr (DISABLED_FEATURES) {

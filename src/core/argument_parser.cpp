@@ -99,6 +99,11 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--kernel-shape", "kernel_shape", Bool},
             OptimizationCliBinding{"--kernel-shape-lr", "kernel_shape_lr", Float},
             OptimizationCliBinding{"--kernel-shape-start", "kernel_shape_start", Integer},
+            OptimizationCliBinding{"--loss-footprint", "loss_footprint", Float},
+            OptimizationCliBinding{"--loss-footprint-start", "loss_footprint_start", Integer},
+            OptimizationCliBinding{"--loss-footprint-ramp", "loss_footprint_ramp", Integer},
+            OptimizationCliBinding{"--loss-footprint-opacity", "loss_footprint_opacity", Bool},
+            OptimizationCliBinding{"--loss-footprint-fraction", "loss_footprint_fraction", Float},
             OptimizationCliBinding{"--pose-lr-deg", "pose_lr_deg", Float},
             OptimizationCliBinding{"--pose-lr-units", "pose_lr_units", Float},
             OptimizationCliBinding{"--pose-opt-start", "pose_opt_start", Integer},
@@ -906,6 +911,11 @@ namespace {
             ::args::Flag kernel_shape(training_group, "enabled", lfs::core::args::optimization_cli_help("--kernel-shape"), {"kernel-shape"});
             ::args::ValueFlag<float> kernel_shape_lr(training_group, "lr", lfs::core::args::optimization_cli_help("--kernel-shape-lr"), {"kernel-shape-lr"});
             ::args::ValueFlag<int> kernel_shape_start(training_group, "iter", lfs::core::args::optimization_cli_help("--kernel-shape-start"), {"kernel-shape-start"});
+            ::args::ValueFlag<float> loss_footprint(training_group, "lambda", lfs::core::args::optimization_cli_help("--loss-footprint"), {"loss-footprint"});
+            ::args::ValueFlag<int> loss_footprint_start(training_group, "iter", lfs::core::args::optimization_cli_help("--loss-footprint-start"), {"loss-footprint-start"});
+            ::args::ValueFlag<int> loss_footprint_ramp(training_group, "iters", lfs::core::args::optimization_cli_help("--loss-footprint-ramp"), {"loss-footprint-ramp"});
+            ::args::Flag loss_footprint_opacity(training_group, "enabled", lfs::core::args::optimization_cli_help("--loss-footprint-opacity"), {"loss-footprint-opacity"});
+            ::args::ValueFlag<float> loss_footprint_fraction(training_group, "fraction", lfs::core::args::optimization_cli_help("--loss-footprint-fraction"), {"loss-footprint-fraction"});
             ::args::ValueFlag<float> pose_lr_deg(training_group, "deg", lfs::core::args::optimization_cli_help("--pose-lr-deg"), {"pose-lr-deg"});
             ::args::ValueFlag<float> pose_lr_units(training_group, "units", lfs::core::args::optimization_cli_help("--pose-lr-units"), {"pose-lr-units"});
             ::args::ValueFlag<int> pose_opt_start(training_group, "iter", lfs::core::args::optimization_cli_help("--pose-opt-start"), {"pose-opt-start"});
@@ -1593,6 +1603,16 @@ namespace {
             if (kernel_shape_start && ::args::get(kernel_shape_start) < 0) {
                 return std::unexpected("ERROR: --kernel-shape-start must be >= 0");
             }
+            if (loss_footprint && (!std::isfinite(::args::get(loss_footprint)) || ::args::get(loss_footprint) < 0.0f || ::args::get(loss_footprint) > 10.0f)) {
+                return std::unexpected("ERROR: --loss-footprint must be within [0, 10] (0 = off)");
+            }
+            if (loss_footprint_fraction && (!std::isfinite(::args::get(loss_footprint_fraction)) || ::args::get(loss_footprint_fraction) < 0.0f ||
+                                            ::args::get(loss_footprint_fraction) > 10.0f)) {
+                return std::unexpected("ERROR: --loss-footprint-fraction must be within [0, 10] (0 = off)");
+            }
+            if ((loss_footprint_start && ::args::get(loss_footprint_start) < 0) || (loss_footprint_ramp && ::args::get(loss_footprint_ramp) < 0)) {
+                return std::unexpected("ERROR: --loss-footprint-start / --loss-footprint-ramp must be >= 0");
+            }
             if (rs_learn_start && ::args::get(rs_learn_start) < 0) {
                 return std::unexpected("ERROR: --rs-learn-start must be >= 0");
             }
@@ -1756,6 +1776,11 @@ namespace {
                                         kernel_shape_flag = bool(kernel_shape),
                                         kernel_shape_lr_val = cli_option_present({"--kernel-shape-lr"}) ? std::optional<float>(::args::get(kernel_shape_lr)) : std::optional<float>(),
                                         kernel_shape_start_val = cli_option_present({"--kernel-shape-start"}) ? std::optional<int>(::args::get(kernel_shape_start)) : std::optional<int>(),
+                                        loss_footprint_val = cli_option_present({"--loss-footprint"}) ? std::optional<float>(::args::get(loss_footprint)) : std::optional<float>(),
+                                        loss_footprint_start_val = cli_option_present({"--loss-footprint-start"}) ? std::optional<int>(::args::get(loss_footprint_start)) : std::optional<int>(),
+                                        loss_footprint_ramp_val = cli_option_present({"--loss-footprint-ramp"}) ? std::optional<int>(::args::get(loss_footprint_ramp)) : std::optional<int>(),
+                                        loss_footprint_opacity_flag = bool(loss_footprint_opacity),
+                                        loss_footprint_fraction_val = cli_option_present({"--loss-footprint-fraction"}) ? std::optional<float>(::args::get(loss_footprint_fraction)) : std::optional<float>(),
                                         pose_lr_deg_val = cli_option_present({"--pose-lr-deg"}) ? std::optional<float>(::args::get(pose_lr_deg)) : std::optional<float>(),
                                         pose_lr_units_val = cli_option_present({"--pose-lr-units"}) ? std::optional<float>(::args::get(pose_lr_units)) : std::optional<float>(),
                                         pose_opt_start_val = cli_option_present({"--pose-opt-start"}) ? std::optional<int>(::args::get(pose_opt_start)) : std::optional<int>(),
@@ -2002,6 +2027,14 @@ namespace {
                 setVal(kernel_shape_lr_val, opt.kernel_shape_lr);
                 if (kernel_shape_start_val)
                     opt.kernel_shape_start = static_cast<size_t>(*kernel_shape_start_val);
+                setVal(loss_footprint_val, opt.loss_footprint);
+                if (loss_footprint_start_val)
+                    opt.loss_footprint_start = static_cast<size_t>(*loss_footprint_start_val);
+                if (loss_footprint_ramp_val)
+                    opt.loss_footprint_ramp = static_cast<size_t>(*loss_footprint_ramp_val);
+                if (loss_footprint_opacity_flag)
+                    opt.loss_footprint_opacity = true;
+                setVal(loss_footprint_fraction_val, opt.loss_footprint_fraction);
                 setVal(pose_lr_deg_val, opt.pose_lr_deg);
                 setVal(pose_lr_units_val, opt.pose_lr_units);
                 if (pose_opt_start_val)
@@ -2224,6 +2257,11 @@ namespace {
                 note_opt("kernel_shape", kernel_shape_flag);
                 note_opt("kernel_shape_lr", kernel_shape_lr_val.has_value());
                 note_opt("kernel_shape_start", kernel_shape_start_val.has_value());
+                note_opt("loss_footprint", loss_footprint_val.has_value());
+                note_opt("loss_footprint_start", loss_footprint_start_val.has_value());
+                note_opt("loss_footprint_ramp", loss_footprint_ramp_val.has_value());
+                note_opt("loss_footprint_opacity", loss_footprint_opacity_flag);
+                note_opt("loss_footprint_fraction", loss_footprint_fraction_val.has_value());
                 note_opt("pose_lr_deg", pose_lr_deg_val.has_value());
                 note_opt("pose_lr_units", pose_lr_units_val.has_value());
                 note_opt("pose_opt_start", pose_opt_start_val.has_value());

@@ -415,6 +415,45 @@ namespace lfs::core::param {
             .ui_step(1000)
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .float_prop(&OptimizationParameters::loss_footprint,
+                        "loss_footprint", "Footprint Loss (game draw cost)", d.loss_footprint, 0.0f, 10.0f,
+                        "LFQPLCYKMO: lambda x the mean number of splats the game draws per pixel of the view (each splat's fpv-render quad, "
+                        "4 min(512 px, R sqrt(l1)) min(512 px, R sqrt(l2)) of the dilated 2D covariance, R = sqrt5 for a Gaussian, "
+                        "min(sqrt5, (2 ln(510 o))^(1/beta)) for a shaped splat; summed over the view, over W x H); gradient into the "
+                        "log-scales (beta, means and rotations get none); standard rasterizer; 0 = off")
+            .precision(6)
+            .ui_step(0.0001)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .size_prop(&OptimizationParameters::loss_footprint_start,
+                       "loss_footprint_start", "Footprint Loss Start", d.loss_footprint_start, 0, 1000000,
+                       "Iteration from which the footprint loss acts (scaled by --steps-scaler, as --distortion-start)")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .size_prop(&OptimizationParameters::loss_footprint_ramp,
+                       "loss_footprint_ramp", "Footprint Loss Ramp", d.loss_footprint_ramp, 0, 1000000,
+                       "Iterations over which the footprint loss weight ramps linearly from 0 to lambda (scaled by --steps-scaler; 0 = at once)")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::loss_footprint_fraction,
+                        "loss_footprint_fraction", "Footprint Loss Fraction (auto lambda)", d.loss_footprint_fraction, 0.0f, 10.0f,
+                        "Instead of a fixed lambda: set lambda at the footprint loss start so the term starts at this fraction of the image "
+                        "loss (fraction x mean image loss / mean footprint over the log-cadence samples of the 2000 iterations before the "
+                        "start, where the footprint is measured without a gradient); 0 = use --loss-footprint")
+            .precision(4)
+            .ui_step(0.01)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .bool_prop(&OptimizationParameters::loss_footprint_opacity,
+                       "loss_footprint_opacity", "Footprint Loss Opacity Gradient", d.loss_footprint_opacity,
+                       "Also send the footprint loss gradient into the opacity, through the quad reach (shaped splats whose alpha-floor "
+                       "contour lies inside the sqrt5 cut: it pushes faint big splats to fade out); default off")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .bool_prop(&OptimizationParameters::pose_opt,
                        "pose_opt", "Camera Pose Refinement", d.pose_opt,
                        "Refine every training camera's pose during training (--native-fisheye standard rasterizer, with or without the rolling shutter; not --gut): a per-camera Adam step of its rotation and camera-centre offset after each of its renders; writes <output>/cameras_refined (COLMAP text, the splat's frame) and pose_refinement.tsv")

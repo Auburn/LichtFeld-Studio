@@ -51,6 +51,8 @@ namespace lfs::app {
     int run_lfe_pose_tool(int argc, const char* const* argv);
     // Developer checks of the per-splat kernel shape, --kernel-shape (lfe_shape_tool.cpp).
     int run_lfe_shape_tool(int argc, const char* const* argv);
+    // Developer check of the footprint loss, --loss-footprint (lfe_footprint_tool.cpp; LFQPLCYKMO).
+    int run_lfe_footprint_tool(int argc, const char* const* argv);
     // LFQPLCYR: headless batch rendering through the trainer's renderer, for the scorers (lfe_render_tool.cpp).
     int run_lfe_render_tool(int argc, const char* const* argv);
     // LFQPLCYR: test-camera registration against a frozen model with the trainer's renderer (lfe_render_tool.cpp).
@@ -272,6 +274,8 @@ int main(int argc, char* argv[]) {
         return lfs::app::run_lfe_pose_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-shape")
         return lfs::app::run_lfe_shape_tool(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "lfe-footprint")
+        return lfs::app::run_lfe_footprint_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-render")
         return lfs::app::run_lfe_render_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-register")

@@ -195,6 +195,10 @@ namespace lfs::training {
         const float* footprint_shape_raw = nullptr;
         float* footprint_loss_out = nullptr;
         float* footprint_area_out = nullptr;
+        // --grad-scale-near D0 (LFQPLCYKMGS; FusedAdamSettings::grad_scale_near_*): scene units, 0 = off. stats_out: optional
+        // device [3] (caller zeros): visible splats, splats with s < 1, the sum of their s
+        float grad_scale_near = 0.0f;
+        float* grad_scale_near_stats_out = nullptr;
         // Optional edge guidance folded into the main blend backward. The map
         // is a median-normalized row-major float32 [H,W], and the destination
         // is a zeroed float32 [N] per-view scratch vector.

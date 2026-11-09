@@ -453,6 +453,15 @@ namespace lfs::core::param {
             .ui_step(0.01)
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .float_prop(&OptimizationParameters::grad_scale_near,
+                        "grad_scale_near", "Near-Camera Gradient Scaling Distance", d.grad_scale_near, 0.0f, 1000.0f,
+                        "Floaters No More (Philip & Deschaintre 2023): each training view's gradients of a splat's own parameters "
+                        "(means, scales, rotation, opacity, SH colour, kernel shape) x min(1, (d / D0)^2), d = the splat centre's "
+                        "distance from that view's camera centre; D0 in scene units; 0 = off")
+            .precision(3)
+            .ui_step(0.05)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .bool_prop(&OptimizationParameters::loss_footprint_opacity,
                        "loss_footprint_opacity", "Footprint Loss Opacity Gradient", d.loss_footprint_opacity,
                        "Also send the footprint loss gradient into the opacity, through the quad reach (shaped splats whose alpha-floor "

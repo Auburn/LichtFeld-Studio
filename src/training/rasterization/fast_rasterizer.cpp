@@ -90,6 +90,12 @@ namespace lfs::training {
         fused_adam.footprint_shape_raw = fused_extra_gradients.footprint_shape_raw;
         fused_adam.footprint_loss_out = fused_extra_gradients.footprint_loss_out;
         fused_adam.footprint_area_out = fused_extra_gradients.footprint_area_out;
+        // --grad-scale-near (LFQPLCYKMGS): 1 / D0^2 (0 = off: the kernels read nothing of it)
+        if (fused_extra_gradients.grad_scale_near > 0.0f) {
+            fused_adam.grad_scale_near_inv_d0_sq =
+                1.0f / (fused_extra_gradients.grad_scale_near * fused_extra_gradients.grad_scale_near);
+            fused_adam.grad_scale_near_stats_out = fused_extra_gradients.grad_scale_near_stats_out;
+        }
         fused_adam.means = convert_param(optimizer_fused.means);
         fused_adam.scaling = convert_param(optimizer_fused.scaling);
         fused_adam.rotation = convert_param(optimizer_fused.rotation);

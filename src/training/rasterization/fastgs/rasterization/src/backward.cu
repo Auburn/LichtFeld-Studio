@@ -90,6 +90,9 @@ void fast_lfs::rasterization::backward(
     float* shape_grad) {
     if (pose_grad != nullptr && lens.model != kLensFisheye)
         throw std::runtime_error("FastGS backward: the pose gradient (--pose-opt) is implemented for the native fisheye lens only");
+    // --grad-scale-near (LFQPLCYKMGS): the preprocess backward scales this view's --kernel-shape dL/dbeta in place (after the
+    // blend backward filled it); off: never bound
+    fused_adam.grad_scale_near_shape_grad = fused_adam.grad_scale_near_inv_d0_sq > 0.0f ? shape_grad : nullptr;
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const uint64_t n_tiles_u64 = static_cast<uint64_t>(grid.x) * static_cast<uint64_t>(grid.y);
     const int n_tiles = checked_to_int(n_tiles_u64, "n_tiles exceeds int range");
@@ -316,7 +319,9 @@ void fast_lfs::rasterization::backward(
                                        fused_adam.rendered_count == nullptr &&
                                        // --loss-footprint (LFQPLCYKMO) lives in the full kernels; off, the choice is unchanged
                                        !(fused_adam.footprint_weight > 0.0f) &&
-                                       fused_adam.footprint_loss_out == nullptr && fused_adam.footprint_area_out == nullptr;
+                                       fused_adam.footprint_loss_out == nullptr && fused_adam.footprint_area_out == nullptr &&
+                                       // --grad-scale-near (LFQPLCYKMGS) lives in the full kernels too
+                                       !(fused_adam.grad_scale_near_inv_d0_sq > 0.0f) && fused_adam.grad_scale_near_stats_out == nullptr;
         auto launch_preprocess_backward_for_mip = [&]<int ACTIVE_SH_BASES, bool DISABLED_FEATURES>() {
             if (mip_filter) {
                 launch_preprocess_backward.template operator()<true, ACTIVE_SH_BASES, DISABLED_FEATURES>();

@@ -3827,6 +3827,16 @@ namespace lfs::training {
                              : " only (opacity gradient off)",
                          500); // = kExtraLossLogInterval (defined further down)
             }
+            if (params.optimization.grad_scale_near > 0.0f) {
+                // LFQPLCYKMGS (fused into the FastGS preprocess backward; fused_adam_types.h)
+                LOG_INFO("Near-camera gradient scaling (--grad-scale-near, LFQPLCYKMGS): d0 = {} scene units; each training view's "
+                         "gradients of a splat's means, log-scales, rotation, opacity, SH colour (sh0 + shN) and kernel shape (the image "
+                         "loss, depth distortion, depth / normal and footprint terms) x min(1, (d / d0)^2), d = the splat centre's "
+                         "distance from that view's camera centre (Philip & Deschaintre 2023, Floaters No More); per-splat "
+                         "regularisers, the camera side (pose, rolling shutter, exposure) and MRNF's growth / exchange statistics "
+                         "unscaled; logged every {} iterations",
+                         params.optimization.grad_scale_near, 500); // = kExtraLossLogInterval (defined further down)
+            }
             if (params.optimization.distortion_weight > 0.0f) {
                 if (params.optimization.gut)
                     LOG_WARN("Depth distortion loss needs the standard rasterizer; ignored with --gut");
@@ -7208,6 +7218,7 @@ namespace lfs::training {
                 // forward's tile-list size for the same log line
                 float footprint_weight_now = 0.0f, footprint_ramp_now = 0.0f;
                 bool footprint_logged = false;
+                bool near_logged = false; // --grad-scale-near (LFQPLCYKMGS): its scalars bound this step
                 long long footprint_n_instances = -1, footprint_n_visible = -1;
                 int footprint_w = 0, footprint_h = 0;
                 // Depth distortion (standard rasterizer, iterations with a Gaussian backward), from
@@ -7352,6 +7363,17 @@ namespace lfs::training {
                             fused_extra_gradients.opacity_binarize_loss_out =
                                 fused_opacity_binarize_loss_.ptr<float>();
                             fused_opacity_binarize_loss_gpu = fused_opacity_binarize_loss_;
+                        }
+                        // --grad-scale-near (LFQPLCYKMGS): every FastGS backward of the run; the counts at the log cadence
+                        if (step_params.grad_scale_near > 0.0f && !step_params.gut) {
+                            fused_extra_gradients.grad_scale_near = step_params.grad_scale_near;
+                            if (iter % kExtraLossLogInterval == 0) {
+                                if (!fused_near_stats_.is_valid())
+                                    fused_near_stats_ = lfs::core::Tensor::zeros({3}, lfs::core::Device::CUDA);
+                                fused_near_stats_.zero_();
+                                fused_extra_gradients.grad_scale_near_stats_out = fused_near_stats_.ptr<float>();
+                                near_logged = true;
+                            }
                         }
                         // --loss-footprint (LFQPLCYKMO): lambda x (the ramp from loss_footprint_start over loss_footprint_ramp);
                         // the loss / mean-footprint scalars are bound at the log cadence only (also before the start, to log
@@ -9211,6 +9233,15 @@ namespace lfs::training {
                         }
                     }
 
+                    if (near_logged && fused_near_stats_.is_valid()) {
+                        // --grad-scale-near (LFQPLCYKMGS): synchronous readback at the log cadence only
+                        const auto ns = fused_near_stats_.cpu().contiguous();
+                        const float* v = ns.ptr<float>();
+                        LOG_INFO("iter {}: near-camera gradient scaling (d0 {}): {} of the view's {} visible splats within d0 ({:.2f}%), "
+                                 "their mean factor {:.3f}",
+                                 iter, step_params.grad_scale_near, static_cast<long long>(v[1]), static_cast<long long>(v[0]),
+                                 v[0] > 0.0f ? 100.0 * v[1] / v[0] : 0.0, v[1] > 0.0f ? v[2] / v[1] : 1.0f);
+                    }
                     if (footprint_logged && fused_footprint_stats_.is_valid()) {
                         // Synchronous readback at the log cadence only. The term is not added to the reported loss (the
                         // progress bar stays the image + other losses, comparable with runs without it).

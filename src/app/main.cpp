@@ -53,6 +53,8 @@ namespace lfs::app {
     int run_lfe_shape_tool(int argc, const char* const* argv);
     // Developer check of the footprint loss, --loss-footprint (lfe_footprint_tool.cpp; LFQPLCYKMO).
     int run_lfe_footprint_tool(int argc, const char* const* argv);
+    // Developer check of the near-camera gradient scaling, --grad-scale-near (lfe_gradnear_tool.cpp; LFQPLCYKMGS).
+    int run_lfe_gradnear_tool(int argc, const char* const* argv);
     // LFQPLCYR: headless batch rendering through the trainer's renderer, for the scorers (lfe_render_tool.cpp).
     int run_lfe_render_tool(int argc, const char* const* argv);
     // LFQPLCYR: test-camera registration against a frozen model with the trainer's renderer (lfe_render_tool.cpp).
@@ -276,6 +278,8 @@ int main(int argc, char* argv[]) {
         return lfs::app::run_lfe_shape_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-footprint")
         return lfs::app::run_lfe_footprint_tool(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "lfe-gradnear")
+        return lfs::app::run_lfe_gradnear_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-render")
         return lfs::app::run_lfe_render_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-register")

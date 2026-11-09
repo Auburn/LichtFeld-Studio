@@ -105,6 +105,7 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--loss-footprint-ramp", "loss_footprint_ramp", Integer},
             OptimizationCliBinding{"--loss-footprint-opacity", "loss_footprint_opacity", Bool},
             OptimizationCliBinding{"--loss-footprint-fraction", "loss_footprint_fraction", Float},
+            OptimizationCliBinding{"--grad-scale-near", "grad_scale_near", Float},
             OptimizationCliBinding{"--pose-lr-deg", "pose_lr_deg", Float},
             OptimizationCliBinding{"--pose-lr-units", "pose_lr_units", Float},
             OptimizationCliBinding{"--pose-opt-start", "pose_opt_start", Integer},
@@ -918,6 +919,7 @@ namespace {
             ::args::ValueFlag<int> loss_footprint_ramp(training_group, "iters", lfs::core::args::optimization_cli_help("--loss-footprint-ramp"), {"loss-footprint-ramp"});
             ::args::Flag loss_footprint_opacity(training_group, "enabled", lfs::core::args::optimization_cli_help("--loss-footprint-opacity"), {"loss-footprint-opacity"});
             ::args::ValueFlag<float> loss_footprint_fraction(training_group, "fraction", lfs::core::args::optimization_cli_help("--loss-footprint-fraction"), {"loss-footprint-fraction"});
+            ::args::ValueFlag<float> grad_scale_near(training_group, "d0", lfs::core::args::optimization_cli_help("--grad-scale-near"), {"grad-scale-near"});
             ::args::ValueFlag<float> pose_lr_deg(training_group, "deg", lfs::core::args::optimization_cli_help("--pose-lr-deg"), {"pose-lr-deg"});
             ::args::ValueFlag<float> pose_lr_units(training_group, "units", lfs::core::args::optimization_cli_help("--pose-lr-units"), {"pose-lr-units"});
             ::args::ValueFlag<int> pose_opt_start(training_group, "iter", lfs::core::args::optimization_cli_help("--pose-opt-start"), {"pose-opt-start"});
@@ -1612,6 +1614,10 @@ namespace {
                                             ::args::get(loss_footprint_fraction) > 10.0f)) {
                 return std::unexpected("ERROR: --loss-footprint-fraction must be within [0, 10] (0 = off)");
             }
+            if (grad_scale_near && (!std::isfinite(::args::get(grad_scale_near)) || ::args::get(grad_scale_near) < 0.0f ||
+                                    ::args::get(grad_scale_near) > 1000.0f)) {
+                return std::unexpected("ERROR: --grad-scale-near must be within [0, 1000] scene units (0 = off)");
+            }
             if ((loss_footprint_start && ::args::get(loss_footprint_start) < 0) || (loss_footprint_ramp && ::args::get(loss_footprint_ramp) < 0)) {
                 return std::unexpected("ERROR: --loss-footprint-start / --loss-footprint-ramp must be >= 0");
             }
@@ -1784,6 +1790,7 @@ namespace {
                                         loss_footprint_ramp_val = cli_option_present({"--loss-footprint-ramp"}) ? std::optional<int>(::args::get(loss_footprint_ramp)) : std::optional<int>(),
                                         loss_footprint_opacity_flag = bool(loss_footprint_opacity),
                                         loss_footprint_fraction_val = cli_option_present({"--loss-footprint-fraction"}) ? std::optional<float>(::args::get(loss_footprint_fraction)) : std::optional<float>(),
+                                        grad_scale_near_val = cli_option_present({"--grad-scale-near"}) ? std::optional<float>(::args::get(grad_scale_near)) : std::optional<float>(),
                                         pose_lr_deg_val = cli_option_present({"--pose-lr-deg"}) ? std::optional<float>(::args::get(pose_lr_deg)) : std::optional<float>(),
                                         pose_lr_units_val = cli_option_present({"--pose-lr-units"}) ? std::optional<float>(::args::get(pose_lr_units)) : std::optional<float>(),
                                         pose_opt_start_val = cli_option_present({"--pose-opt-start"}) ? std::optional<int>(::args::get(pose_opt_start)) : std::optional<int>(),
@@ -2040,6 +2047,7 @@ namespace {
                 if (loss_footprint_opacity_flag)
                     opt.loss_footprint_opacity = true;
                 setVal(loss_footprint_fraction_val, opt.loss_footprint_fraction);
+                setVal(grad_scale_near_val, opt.grad_scale_near);
                 setVal(pose_lr_deg_val, opt.pose_lr_deg);
                 setVal(pose_lr_units_val, opt.pose_lr_units);
                 if (pose_opt_start_val)
@@ -2268,6 +2276,7 @@ namespace {
                 note_opt("loss_footprint_ramp", loss_footprint_ramp_val.has_value());
                 note_opt("loss_footprint_opacity", loss_footprint_opacity_flag);
                 note_opt("loss_footprint_fraction", loss_footprint_fraction_val.has_value());
+                note_opt("grad_scale_near", grad_scale_near_val.has_value());
                 note_opt("pose_lr_deg", pose_lr_deg_val.has_value());
                 note_opt("pose_lr_units", pose_lr_units_val.has_value());
                 note_opt("pose_opt_start", pose_opt_start_val.has_value());

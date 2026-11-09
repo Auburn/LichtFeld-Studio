@@ -982,6 +982,8 @@ namespace lfs::training {
         double footprint_cal_loss_sum_ = 0.0, footprint_cal_area_sum_ = 0.0;
         int footprint_cal_n_ = 0;
         float footprint_lambda_auto_ = -1.0f;
+        // --grad-scale-near (LFQPLCYKMGS): [visible splats, splats with s < 1, sum of their s] of the logged step
+        core::Tensor fused_near_stats_;
         core::Tensor fused_erank_reg_loss_;
         core::Tensor fused_dc_reg_loss_;
         core::Tensor fused_sh_rest_reg_loss_;

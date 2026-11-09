@@ -81,6 +81,18 @@ namespace fast_lfs::rasterization {
         float mean_step_median_extent = 0.0f;
         const bool* mean_step_far_mask = nullptr;
         int mean_step_far_mask_n = 0;
+        // --grad-scale-near D0 (LFQPLCYKMGS; after Philip & Deschaintre, "Floaters No More: Radiance Field Gradient Scaling",
+        // EGSR 2023): every gradient this view gives a visible splat's own parameters (means, log-scales, rotation, raw opacity,
+        // sh0, shN and, through grad_scale_near_shape_grad, the --kernel-shape beta) is multiplied by s = min(1, d^2 / D0^2),
+        // d = the distance of the splat's centre from the view's camera centre (cam_position; a distance, not camera z: the
+        // lens is a ~180-degree fisheye). That covers every per-view term that reaches the splat: the image loss, the depth
+        // distortion term, depth / normal supervision and the footprint loss. Left as they are: the per-splat regularisers
+        // (scale / opacity / binarize / erank / flatten / dc / sh-rest, the screen-share hinge), every camera-side gradient
+        // (pose, rolling-shutter motion and readout, exposure scale, grad_w2c) and the blend backward's densification /
+        // removal-impact sums. Splats at d >= D0 are untouched (s = 1: not even multiplied). 0 = off: nothing below is read.
+        float grad_scale_near_inv_d0_sq = 0.0f;      // 1 / D0^2 (D0 in scene units)
+        float* grad_scale_near_shape_grad = nullptr; // set by backward(): this view's dL/dbeta buffer, scaled in place per splat
+        float* grad_scale_near_stats_out = nullptr;  // optional [3]: += visible splats, += those with s < 1, += the sum of their s
 
         FusedAdamParam means;
         FusedAdamParam scaling;

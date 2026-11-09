@@ -968,6 +968,10 @@ namespace lfs::core {
                 return "give --loss-footprint LAMBDA or --loss-footprint-fraction F, not both";
             if (loss_footprint_fraction > 0.0f && gut)
                 return "--loss-footprint-fraction is implemented for the standard (FastGS) rasterizer, not --gut";
+            if (!std::isfinite(grad_scale_near) || grad_scale_near < 0.0f || grad_scale_near > 1000.0f)
+                return std::format("grad_scale_near must be within [0, 1000] scene units (got {})", grad_scale_near);
+            if (grad_scale_near > 0.0f && gut)
+                return "--grad-scale-near is implemented for the standard (FastGS) rasterizer, not --gut";
             if (loss_footprint_start > MAX_ITERATION_VALUE || loss_footprint_ramp > MAX_ITERATION_VALUE)
                 return std::format("loss_footprint_start / loss_footprint_ramp must be within [0, {}]", MAX_ITERATION_VALUE);
             if (max_std_dev > 0.0f && gut)

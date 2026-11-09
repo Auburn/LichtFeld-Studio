@@ -300,6 +300,12 @@ namespace lfs::core {
             // the image loss: F x mean(image + other losses) / mean(footprint), over the log-cadence samples in the 2000 iterations
             // before the start (the footprint is measured there with no gradient). 0 = use loss_footprint as given.
             float loss_footprint_fraction = 0.0f;
+            // --grad-scale-near D0 (LFQPLCYKMGS; after Philip & Deschaintre, "Floaters No More: Radiance Field Gradient Scaling",
+            // EGSR 2023): each training view's gradients of a splat's own parameters (means, scales, rotation, opacity, SH colour,
+            // kernel shape; from the image loss and every other per-view term) multiplied by min(1, (d / D0)^2), d = the splat
+            // centre's distance from that view's camera centre, in scene units. Fixes near-camera floaters: a splat beside one
+            // training camera covers many of its pixels and gets a huge gradient from it. FastGS only. 0 = off.
+            float grad_scale_near = 0.0f;
             float min_opacity = 0.005f;
             size_t refine_every = 100;
             size_t start_refine = 500;

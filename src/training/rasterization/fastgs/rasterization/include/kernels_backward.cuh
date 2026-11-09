@@ -216,6 +216,21 @@ namespace fast_lfs::rasterization::kernels::backward {
             if (visible && fused_adam.rendered_count != nullptr)
                 fused_adam.rendered_count[primitive_idx] += 1.0f;
         }
+        // --grad-scale-near (LFQPLCYKMGS; fused_adam_types.h): this view's factor s = min(1, |mean - camera centre|^2 / D0^2)
+        // for this splat. near_on only when s < 1: a splat at d >= D0 runs exactly the code it ran before. The full kernels
+        // only (backward.cu never picks DISABLED_FEATURES with the option on). The --kernel-shape dL/dbeta the blend backward
+        // left in the view's buffer is scaled here, before this kernel adds the motion blur's term (scaled below).
+        bool near_on = false;
+        float near_s = 1.0f;
+        if constexpr (!DISABLED_FEATURES) {
+            if (visible && fused_adam.grad_scale_near_inv_d0_sq > 0.0f) {
+                const float3 near_dc = means[primitive_idx] - cam_position[0];
+                near_s = fminf(1.0f, dot(near_dc, near_dc) * fused_adam.grad_scale_near_inv_d0_sq);
+                near_on = near_s < 1.0f;
+                if (near_on && fused_adam.grad_scale_near_shape_grad != nullptr)
+                    fused_adam.grad_scale_near_shape_grad[primitive_idx] *= near_s;
+            }
+        }
 
         // Gate the accumulated image derivative. Negative colour may recover
         // only when its image derivative points brighter under gradient descent.
@@ -280,6 +295,13 @@ namespace fast_lfs::rasterization::kernels::backward {
                 shN_value_bounds,
                 shN_value_bounds != nullptr ? shN_value_n_cells : 0u,
                 shN_value_bits == 16u ? 16u : 0u);
+            if constexpr (!DISABLED_FEATURES) { // --grad-scale-near: sh0's image-loss gradient (the dc regulariser is added below)
+                if (near_on) {
+                    sh0_grads[0] *= near_s;
+                    sh0_grads[1] *= near_s;
+                    sh0_grads[2] *= near_s;
+                }
+            }
         } // close visible — SH Adam next kills shN live range before geometry
 
         if constexpr (!DISABLED_FEATURES)
@@ -317,7 +339,7 @@ namespace fast_lfs::rasterization::kernels::backward {
             const float3 sh_gc = visible ? grad_color_helper[work_idx] : make_float3(0.0f, 0.0f, 0.0f);
             apply_shN_grads_packed<ACTIVE_SH_BASES, !DISABLED_FEATURES>(
                 fused_adam, primitive_idx, sh_layout_slots,
-                sh_mean, sh_cam, sh_gc, visible, colour_reg_mask);
+                sh_mean, sh_cam, near_on ? sh_gc * near_s : sh_gc, visible, colour_reg_mask); // --grad-scale-near: shN (its regulariser unscaled)
         }
         // sh0 / streamed shN Adam state is dead from here on (compiler can free it).
 
@@ -507,6 +529,9 @@ namespace fast_lfs::rasterization::kernels::backward {
             const float sigmoid_derivative = original_opacity * (1.0f - original_opacity);
             opacity_grads[0] = grad_compensated_opacity * opacity_compensation * sigmoid_derivative +
                                opacity_extra_grad(fused_adam, fused_adam.opacity, primitive_idx);
+            if (near_on) // --grad-scale-near: the image-side term only (the opacity regularisers unscaled)
+                opacity_grads[0] = grad_compensated_opacity * near_s * opacity_compensation * sigmoid_derivative +
+                                   opacity_extra_grad(fused_adam, fused_adam.opacity, primitive_idx);
 
             // --motion-blur: kappa's dependence on S_b and S0 (d log det S = S^-1 : dS; dL_dcov2d's (a, b/2, c) convention),
             // then dL/d(dmu) = 2/12 G dmu (G = dL/dS_b), dL/d(dp) = J^T dL/d(dmu), dL/dJ = dL/d(dmu) dp^T
@@ -525,7 +550,7 @@ namespace fast_lfs::rasterization::kernels::backward {
                         const float g_c = G.x * blur_dmu.x * blur_dmu.x + 2.0f * G.y * blur_dmu.x * blur_dmu.y + G.z * blur_dmu.y * blur_dmu.y;
                         const float g_beta = g_c * kshape::blur_smear_scale_dbeta(blur_beta, blur_k12);
                         if (g_beta != 0.0f && isfinite(g_beta))
-                            atomicAdd(&shape_grad[primitive_idx], g_beta);
+                            atomicAdd(&shape_grad[primitive_idx], near_on ? g_beta * near_s : g_beta); // --grad-scale-near
                     }
                 }
             }
@@ -638,6 +663,8 @@ namespace fast_lfs::rasterization::kernels::backward {
                 if (blur) // --motion-blur: through the chord's endpoints
                     dL_dmean3d += rolling_shutter::blur_mean_grad(rs_motion, blur_t, blur_te, w2c, blur_g_dp);
             }
+            if (near_on) // --grad-scale-near (the pose / rolling-shutter gradients above used the unscaled terms)
+                dL_dmean3d *= near_s;
             const float3 clamped_mean = clamp_grad3(dL_dmean3d);
             mean_grads[0] = clamped_mean.x;
             mean_grads[1] = clamped_mean.y;
@@ -654,7 +681,7 @@ namespace fast_lfs::rasterization::kernels::backward {
                 (raw_scale.x < config::max_raw_scale) ? 2.0f * variance.x * dL_dvariance_x : 0.0f,
                 (raw_scale.y < config::max_raw_scale) ? 2.0f * variance.y * dL_dvariance_y : 0.0f,
                 (raw_scale.z < config::max_raw_scale) ? 2.0f * variance.z * dL_dvariance_z : 0.0f);
-            const float3 clamped_scale_grad = clamp_grad3(dL_draw_scale);
+            const float3 clamped_scale_grad = clamp_grad3(near_on ? dL_draw_scale * near_s : dL_draw_scale); // --grad-scale-near
             const uint scale_base = primitive_idx * 3;
             scale_grads[0] = clamped_scale_grad.x + scale_regularization_grad<!DISABLED_FEATURES>(fused_adam, fused_adam.scaling, scale_base) + erank_grads[0];
             scale_grads[1] = clamped_scale_grad.y + scale_regularization_grad<!DISABLED_FEATURES>(fused_adam, fused_adam.scaling, scale_base + 1) + erank_grads[1];
@@ -682,7 +709,8 @@ namespace fast_lfs::rasterization::kernels::backward {
                     footprint_area_local = fp.area * inv_px;
                     footprint_loss_local = fused_adam.footprint_weight * footprint_area_local;
                     if (fused_adam.footprint_weight > 0.0f && fp.area > 0.0f) {
-                        const float coef = fused_adam.footprint_weight * inv_px;
+                        // --grad-scale-near: the footprint term is a per-view term too (its value / lambda unchanged)
+                        const float coef = near_on ? fused_adam.footprint_weight * inv_px * near_s : fused_adam.footprint_weight * inv_px;
                         const float3 rc[3] = {make_float3(rotation.m11, rotation.m21, rotation.m31),
                                               make_float3(rotation.m12, rotation.m22, rotation.m32),
                                               make_float3(rotation.m13, rotation.m23, rotation.m33)};
@@ -850,7 +878,7 @@ namespace fast_lfs::rasterization::kernels::backward {
             const float dL_dqrz = dL_drotation.m21 - dL_drotation.m12;
             const float dL_dq_norm_helper = qxx * dL_dqxx + qyy * dL_dqyy + qzz * dL_dqzz + qxy * dL_dqxy + qxz * dL_dqxz + qyz * dL_dqyz + qrx * dL_dqrx + qry * dL_dqry + qrz * dL_dqrz;
             const float4 dL_draw_rotation = make_float4(qx * dL_dqrx + qy * dL_dqry + qz * dL_dqrz - qr * dL_dq_norm_helper, 2.0f * qx * dL_dqxx + qy * dL_dqxy + qz * dL_dqxz + qr * dL_dqrx - qx * dL_dq_norm_helper, 2.0f * qy * dL_dqyy + qx * dL_dqxy + qz * dL_dqyz + qr * dL_dqry - qy * dL_dq_norm_helper, 2.0f * qz * dL_dqzz + qx * dL_dqxz + qy * dL_dqyz + qr * dL_dqrz - qz * dL_dq_norm_helper) * inv_q_norm_sq;
-            const float4 clamped_rotation = clamp_grad4(dL_draw_rotation);
+            const float4 clamped_rotation = clamp_grad4(near_on ? dL_draw_rotation * near_s : dL_draw_rotation); // --grad-scale-near
             rotation_grads[0] = clamped_rotation.x;
             rotation_grads[1] = clamped_rotation.y;
             rotation_grads[2] = clamped_rotation.z;
@@ -858,7 +886,10 @@ namespace fast_lfs::rasterization::kernels::backward {
 
             if (densification_info != nullptr) {
                 densification_info[primitive_idx] += 1.0f;
-                densification_info[n_primitives + primitive_idx] += length(dL_dmean2d * make_float2(0.5f * w, 0.5f * h));
+                // --grad-scale-near: a gradient-norm densifier (DensificationType::None) reads the scaled gradient (MRNF / MCMC
+                // grow on the blend backward's coverage sums, which the option does not touch)
+                const float dens_g = length(dL_dmean2d * make_float2(0.5f * w, 0.5f * h));
+                densification_info[n_primitives + primitive_idx] += near_on ? dens_g * near_s : dens_g;
             }
         } // visible geometry
 
@@ -892,6 +923,20 @@ namespace fast_lfs::rasterization::kernels::backward {
                 const float block_sum = lfs::core::warp_ops::block_reduce_sum(footprint_area_local);
                 if (threadIdx.x == 0 && block_sum != 0.0f)
                     atomicAdd(fused_adam.footprint_area_out, block_sum);
+            }
+            // --grad-scale-near: the view's visible splats, those scaled and their factors (only when the caller binds the scalars)
+            if (fused_adam.grad_scale_near_stats_out != nullptr) {
+                const float n_vis = lfs::core::warp_ops::block_reduce_sum(visible ? 1.0f : 0.0f);
+                const float n_near = lfs::core::warp_ops::block_reduce_sum(near_on ? 1.0f : 0.0f);
+                const float s_near = lfs::core::warp_ops::block_reduce_sum(near_on ? near_s : 0.0f);
+                if (threadIdx.x == 0) {
+                    if (n_vis != 0.0f)
+                        atomicAdd(&fused_adam.grad_scale_near_stats_out[0], n_vis);
+                    if (n_near != 0.0f) {
+                        atomicAdd(&fused_adam.grad_scale_near_stats_out[1], n_near);
+                        atomicAdd(&fused_adam.grad_scale_near_stats_out[2], s_near);
+                    }
+                }
             }
         }
 

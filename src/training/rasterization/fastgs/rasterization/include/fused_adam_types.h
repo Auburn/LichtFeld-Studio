@@ -93,6 +93,14 @@ namespace fast_lfs::rasterization {
         float grad_scale_near_inv_d0_sq = 0.0f;      // 1 / D0^2 (D0 in scene units)
         float* grad_scale_near_shape_grad = nullptr; // set by backward(): this view's dL/dbeta buffer, scaled in place per splat
         float* grad_scale_near_stats_out = nullptr;  // optional [3]: += visible splats, += those with s < 1, += the sum of their s
+        // --aniso-max-ratio r / --aniso-weight lambda (LFQPLCYKMAN; after PhysGaussian, Xie et al. 2024): a per-splat regulariser
+        // like erank, evaluated for EVERY splat (visible or not) once per step: loss = lambda / N x sum max(0, s_max / s_mid - r),
+        // s = exp(log-scales). Gradient into the log-scales only: d/dl_max = +c rho, d/dl_mid = -c rho (rho = s_max / s_mid,
+        // c = lambda / N) for splats over r; zero otherwise. Not scaled by --grad-scale-near (a parameter prior). r = 0 = off.
+        float aniso_max_ratio = 0.0f;
+        float aniso_weight = 0.0f;
+        float* aniso_loss_out = nullptr;  // optional: += the loss (lambda x mean excess)
+        float* aniso_stats_out = nullptr; // optional [2]: += splats, += splats with rho > r
 
         FusedAdamParam means;
         FusedAdamParam scaling;

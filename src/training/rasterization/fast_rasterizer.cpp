@@ -96,6 +96,13 @@ namespace lfs::training {
                 1.0f / (fused_extra_gradients.grad_scale_near * fused_extra_gradients.grad_scale_near);
             fused_adam.grad_scale_near_stats_out = fused_extra_gradients.grad_scale_near_stats_out;
         }
+        // --aniso-max-ratio (LFQPLCYKMAN): 0 = off: the kernels read nothing of it
+        if (fused_extra_gradients.aniso_max_ratio > 0.0f) { // weight 0 = count only (logged before --aniso-start)
+            fused_adam.aniso_max_ratio = fused_extra_gradients.aniso_max_ratio;
+            fused_adam.aniso_weight = fused_extra_gradients.aniso_weight;
+            fused_adam.aniso_loss_out = fused_extra_gradients.aniso_loss_out;
+            fused_adam.aniso_stats_out = fused_extra_gradients.aniso_stats_out;
+        }
         fused_adam.means = convert_param(optimizer_fused.means);
         fused_adam.scaling = convert_param(optimizer_fused.scaling);
         fused_adam.rotation = convert_param(optimizer_fused.rotation);

@@ -306,6 +306,12 @@ namespace lfs::core {
             // centre's distance from that view's camera centre, in scene units. Fixes near-camera floaters: a splat beside one
             // training camera covers many of its pixels and gets a huge gradient from it. FastGS only. 0 = off.
             float grad_scale_near = 0.0f;
+            // --aniso-max-ratio r / --aniso-weight lambda / --aniso-start iter (LFQPLCYKMAN; after PhysGaussian's anisotropy
+            // regulariser, Xie et al. 2024): loss = lambda x mean over splats of max(0, s_max / s_mid - r), s = the 3 activated
+            // (exp) scales. Only needles pay; round and flat splats cost nothing. FastGS fused path only. r = 0 = off.
+            float aniso_max_ratio = 0.0f;
+            float aniso_weight = 0.0f;
+            size_t aniso_start = 0;
             float min_opacity = 0.005f;
             size_t refine_every = 100;
             size_t start_refine = 500;

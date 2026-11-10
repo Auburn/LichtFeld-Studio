@@ -462,6 +462,28 @@ namespace lfs::core::param {
             .ui_step(0.05)
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .float_prop(&OptimizationParameters::aniso_max_ratio,
+                        "aniso_max_ratio", "Anisotropy Max Ratio", d.aniso_max_ratio, 0.0f, 1000.0f,
+                        "Anti-needle loss (PhysGaussian): per splat max(0, s_max / s_mid - r) of its activated scales, averaged over "
+                        "splats, x --aniso-weight; r = the allowed largest-to-middle scale ratio; 0 = off")
+            .precision(2)
+            .ui_step(0.5)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::aniso_weight,
+                        "aniso_weight", "Anisotropy Loss Weight", d.aniso_weight, 0.0f, 1000000.0f,
+                        "lambda of the anti-needle loss (--aniso-max-ratio): loss = lambda x mean over splats of max(0, s_max / s_mid - r)")
+            .precision(3)
+            .ui_step(0.1)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .size_prop(&OptimizationParameters::aniso_start,
+                       "aniso_start", "Anisotropy Loss Start", d.aniso_start, 0, 1000000,
+                       "Iteration from which the anti-needle loss (--aniso-max-ratio) is active")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .bool_prop(&OptimizationParameters::loss_footprint_opacity,
                        "loss_footprint_opacity", "Footprint Loss Opacity Gradient", d.loss_footprint_opacity,
                        "Also send the footprint loss gradient into the opacity, through the quad reach (shaped splats whose alpha-floor "

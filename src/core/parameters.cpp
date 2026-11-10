@@ -972,6 +972,16 @@ namespace lfs::core {
                 return std::format("grad_scale_near must be within [0, 1000] scene units (got {})", grad_scale_near);
             if (grad_scale_near > 0.0f && gut)
                 return "--grad-scale-near is implemented for the standard (FastGS) rasterizer, not --gut";
+            if (!std::isfinite(aniso_max_ratio) || (aniso_max_ratio != 0.0f && (aniso_max_ratio < 1.0f || aniso_max_ratio > 1000.0f)))
+                return std::format("aniso_max_ratio must be 0 (off) or within [1, 1000] (got {})", aniso_max_ratio);
+            if (!std::isfinite(aniso_weight) || aniso_weight < 0.0f || aniso_weight > 1e6f)
+                return std::format("aniso_weight must be within [0, 1e6] (got {})", aniso_weight);
+            if (aniso_max_ratio > 0.0f && !(aniso_weight > 0.0f))
+                return "--aniso-max-ratio needs --aniso-weight LAMBDA > 0";
+            if (aniso_max_ratio > 0.0f && gut)
+                return "--aniso-max-ratio is implemented for the standard (FastGS) rasterizer, not --gut";
+            if (aniso_start > MAX_ITERATION_VALUE)
+                return std::format("aniso_start must be within [0, {}]", MAX_ITERATION_VALUE);
             if (loss_footprint_start > MAX_ITERATION_VALUE || loss_footprint_ramp > MAX_ITERATION_VALUE)
                 return std::format("loss_footprint_start / loss_footprint_ramp must be within [0, {}]", MAX_ITERATION_VALUE);
             if (max_std_dev > 0.0f && gut)

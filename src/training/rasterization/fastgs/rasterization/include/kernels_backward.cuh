@@ -116,6 +116,7 @@ namespace fast_lfs::rasterization::kernels::backward {
         float erank_loss_local = 0.0f;
         float dc_loss_local = 0.0f;
         float erank_grads[3] = {0.0f, 0.0f, 0.0f};
+        float aniso_loss_local = 0.0f, aniso_over_local = 0.0f; // --aniso-max-ratio (LFQPLCYKMAN)
         if (in_range) {
             if (fused_adam.scale_reg_loss_out != nullptr &&
                 fused_adam.scale_reg_weight > 0.0f &&
@@ -152,6 +153,26 @@ namespace fast_lfs::rasterization::kernels::backward {
                     erank_loss_local = coef * penalty.value;
                     for (int axis = 0; axis < 3; ++axis)
                         erank_grads[axis] = coef * penalty.gradient[axis];
+                }
+                // --aniso-max-ratio (LFQPLCYKMAN; fused_adam_types.h): lambda / N x max(0, s_max / s_mid - r) on the activated
+                // scales, added to the erank slot (both are log-scale priors). Ties: the first of equal axes counts as the larger.
+                if (fused_adam.aniso_max_ratio > 0.0f && fused_adam.scaling.n_primitives > 0) {
+                    const uint ab = static_cast<uint>(primitive_idx) * 3u;
+                    const float l[3] = {fused_adam.scaling.param[ab], fused_adam.scaling.param[ab + 1u], fused_adam.scaling.param[ab + 2u]};
+                    int imax = 0;
+                    if (l[1] > l[imax]) imax = 1;
+                    if (l[2] > l[imax]) imax = 2;
+                    const int a1 = (imax + 1) % 3, a2 = (imax + 2) % 3;
+                    const int imid = l[a1] >= l[a2] ? a1 : a2;
+                    const float rho = expf(fminf(l[imax] - l[imid], 80.0f));
+                    const bool over = rho > fused_adam.aniso_max_ratio;
+                    if (over) {
+                        const float c = fused_adam.aniso_weight / static_cast<float>(fused_adam.scaling.n_primitives);
+                        aniso_loss_local = c * (rho - fused_adam.aniso_max_ratio);
+                        erank_grads[imax] += c * rho;
+                        erank_grads[imid] -= c * rho;
+                    }
+                    aniso_over_local = over ? 1.0f : 0.0f;
                 }
             }
             if (fused_adam.opacity_reg_loss_out != nullptr &&
@@ -195,6 +216,21 @@ namespace fast_lfs::rasterization::kernels::backward {
                 if (threadIdx.x == 0 && block_sum != 0.0f)
                     atomicAdd(fused_adam.erank_reg_loss_out, block_sum);
             }
+        if constexpr (!DISABLED_FEATURES) { // --aniso-max-ratio (LFQPLCYKMAN): loss and counts; uniform branches (kernel args)
+            if (fused_adam.aniso_loss_out != nullptr) {
+                const float block_sum = lfs::core::warp_ops::block_reduce_sum(aniso_loss_local);
+                if (threadIdx.x == 0 && block_sum != 0.0f)
+                    atomicAdd(fused_adam.aniso_loss_out, block_sum);
+            }
+            if (fused_adam.aniso_stats_out != nullptr) {
+                const float n_sum = lfs::core::warp_ops::block_reduce_sum(in_range ? 1.0f : 0.0f);
+                const float o_sum = lfs::core::warp_ops::block_reduce_sum(aniso_over_local);
+                if (threadIdx.x == 0) {
+                    atomicAdd(fused_adam.aniso_stats_out, n_sum);
+                    atomicAdd(fused_adam.aniso_stats_out + 1, o_sum);
+                }
+            }
+        }
 
         // Grad buffers. Joint block-bounds needs all threads to hit the same
         // adam_step_row sequence — no early returns before Adam sections.

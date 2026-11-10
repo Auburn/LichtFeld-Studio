@@ -199,6 +199,12 @@ namespace lfs::training {
         // device [3] (caller zeros): visible splats, splats with s < 1, the sum of their s
         float grad_scale_near = 0.0f;
         float* grad_scale_near_stats_out = nullptr;
+        // --aniso-max-ratio r / --aniso-weight lambda (LFQPLCYKMAN; FusedAdamSettings::aniso_*): r = 0 = off.
+        // loss_out: optional device scalar (caller zeros) += lambda x mean excess; stats_out: optional [2] += splats, += splats over r
+        float aniso_max_ratio = 0.0f;
+        float aniso_weight = 0.0f;
+        float* aniso_loss_out = nullptr;
+        float* aniso_stats_out = nullptr;
         // Optional edge guidance folded into the main blend backward. The map
         // is a median-normalized row-major float32 [H,W], and the destination
         // is a zeroed float32 [N] per-view scratch vector.

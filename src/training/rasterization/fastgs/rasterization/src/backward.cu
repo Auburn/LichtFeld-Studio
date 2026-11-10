@@ -321,7 +321,10 @@ void fast_lfs::rasterization::backward(
                                        !(fused_adam.footprint_weight > 0.0f) &&
                                        fused_adam.footprint_loss_out == nullptr && fused_adam.footprint_area_out == nullptr &&
                                        // --grad-scale-near (LFQPLCYKMGS) lives in the full kernels too
-                                       !(fused_adam.grad_scale_near_inv_d0_sq > 0.0f) && fused_adam.grad_scale_near_stats_out == nullptr;
+                                       !(fused_adam.grad_scale_near_inv_d0_sq > 0.0f) && fused_adam.grad_scale_near_stats_out == nullptr &&
+                                       // --aniso-max-ratio (LFQPLCYKMAN) lives in the full kernels too
+                                       !(fused_adam.aniso_max_ratio > 0.0f) && fused_adam.aniso_loss_out == nullptr &&
+                                       fused_adam.aniso_stats_out == nullptr;
         auto launch_preprocess_backward_for_mip = [&]<int ACTIVE_SH_BASES, bool DISABLED_FEATURES>() {
             if (mip_filter) {
                 launch_preprocess_backward.template operator()<true, ACTIVE_SH_BASES, DISABLED_FEATURES>();

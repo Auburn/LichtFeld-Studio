@@ -106,6 +106,9 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--loss-footprint-opacity", "loss_footprint_opacity", Bool},
             OptimizationCliBinding{"--loss-footprint-fraction", "loss_footprint_fraction", Float},
             OptimizationCliBinding{"--grad-scale-near", "grad_scale_near", Float},
+            OptimizationCliBinding{"--aniso-max-ratio", "aniso_max_ratio", Float},
+            OptimizationCliBinding{"--aniso-weight", "aniso_weight", Float},
+            OptimizationCliBinding{"--aniso-start", "aniso_start", Integer},
             OptimizationCliBinding{"--pose-lr-deg", "pose_lr_deg", Float},
             OptimizationCliBinding{"--pose-lr-units", "pose_lr_units", Float},
             OptimizationCliBinding{"--pose-opt-start", "pose_opt_start", Integer},
@@ -920,6 +923,9 @@ namespace {
             ::args::Flag loss_footprint_opacity(training_group, "enabled", lfs::core::args::optimization_cli_help("--loss-footprint-opacity"), {"loss-footprint-opacity"});
             ::args::ValueFlag<float> loss_footprint_fraction(training_group, "fraction", lfs::core::args::optimization_cli_help("--loss-footprint-fraction"), {"loss-footprint-fraction"});
             ::args::ValueFlag<float> grad_scale_near(training_group, "d0", lfs::core::args::optimization_cli_help("--grad-scale-near"), {"grad-scale-near"});
+            ::args::ValueFlag<float> aniso_max_ratio(training_group, "r", lfs::core::args::optimization_cli_help("--aniso-max-ratio"), {"aniso-max-ratio"});
+            ::args::ValueFlag<float> aniso_weight(training_group, "lambda", lfs::core::args::optimization_cli_help("--aniso-weight"), {"aniso-weight"});
+            ::args::ValueFlag<int> aniso_start(training_group, "iter", lfs::core::args::optimization_cli_help("--aniso-start"), {"aniso-start"});
             ::args::ValueFlag<float> pose_lr_deg(training_group, "deg", lfs::core::args::optimization_cli_help("--pose-lr-deg"), {"pose-lr-deg"});
             ::args::ValueFlag<float> pose_lr_units(training_group, "units", lfs::core::args::optimization_cli_help("--pose-lr-units"), {"pose-lr-units"});
             ::args::ValueFlag<int> pose_opt_start(training_group, "iter", lfs::core::args::optimization_cli_help("--pose-opt-start"), {"pose-opt-start"});
@@ -1618,6 +1624,16 @@ namespace {
                                     ::args::get(grad_scale_near) > 1000.0f)) {
                 return std::unexpected("ERROR: --grad-scale-near must be within [0, 1000] scene units (0 = off)");
             }
+            if (aniso_max_ratio && (!std::isfinite(::args::get(aniso_max_ratio)) || (::args::get(aniso_max_ratio) != 0.0f &&
+                                    (::args::get(aniso_max_ratio) < 1.0f || ::args::get(aniso_max_ratio) > 1000.0f)))) {
+                return std::unexpected("ERROR: --aniso-max-ratio must be 0 (off) or within [1, 1000]");
+            }
+            if (aniso_weight && (!std::isfinite(::args::get(aniso_weight)) || ::args::get(aniso_weight) < 0.0f || ::args::get(aniso_weight) > 1e6f)) {
+                return std::unexpected("ERROR: --aniso-weight must be within [0, 1e6]");
+            }
+            if (aniso_start && ::args::get(aniso_start) < 0) {
+                return std::unexpected("ERROR: --aniso-start must be >= 0");
+            }
             if ((loss_footprint_start && ::args::get(loss_footprint_start) < 0) || (loss_footprint_ramp && ::args::get(loss_footprint_ramp) < 0)) {
                 return std::unexpected("ERROR: --loss-footprint-start / --loss-footprint-ramp must be >= 0");
             }
@@ -1791,6 +1807,9 @@ namespace {
                                         loss_footprint_opacity_flag = bool(loss_footprint_opacity),
                                         loss_footprint_fraction_val = cli_option_present({"--loss-footprint-fraction"}) ? std::optional<float>(::args::get(loss_footprint_fraction)) : std::optional<float>(),
                                         grad_scale_near_val = cli_option_present({"--grad-scale-near"}) ? std::optional<float>(::args::get(grad_scale_near)) : std::optional<float>(),
+                                        aniso_max_ratio_val = cli_option_present({"--aniso-max-ratio"}) ? std::optional<float>(::args::get(aniso_max_ratio)) : std::optional<float>(),
+                                        aniso_weight_val = cli_option_present({"--aniso-weight"}) ? std::optional<float>(::args::get(aniso_weight)) : std::optional<float>(),
+                                        aniso_start_val = cli_option_present({"--aniso-start"}) ? std::optional<int>(::args::get(aniso_start)) : std::optional<int>(),
                                         pose_lr_deg_val = cli_option_present({"--pose-lr-deg"}) ? std::optional<float>(::args::get(pose_lr_deg)) : std::optional<float>(),
                                         pose_lr_units_val = cli_option_present({"--pose-lr-units"}) ? std::optional<float>(::args::get(pose_lr_units)) : std::optional<float>(),
                                         pose_opt_start_val = cli_option_present({"--pose-opt-start"}) ? std::optional<int>(::args::get(pose_opt_start)) : std::optional<int>(),
@@ -2048,6 +2067,10 @@ namespace {
                     opt.loss_footprint_opacity = true;
                 setVal(loss_footprint_fraction_val, opt.loss_footprint_fraction);
                 setVal(grad_scale_near_val, opt.grad_scale_near);
+                setVal(aniso_max_ratio_val, opt.aniso_max_ratio);
+                setVal(aniso_weight_val, opt.aniso_weight);
+                if (aniso_start_val)
+                    opt.aniso_start = static_cast<size_t>(*aniso_start_val);
                 setVal(pose_lr_deg_val, opt.pose_lr_deg);
                 setVal(pose_lr_units_val, opt.pose_lr_units);
                 if (pose_opt_start_val)
@@ -2277,6 +2300,9 @@ namespace {
                 note_opt("loss_footprint_opacity", loss_footprint_opacity_flag);
                 note_opt("loss_footprint_fraction", loss_footprint_fraction_val.has_value());
                 note_opt("grad_scale_near", grad_scale_near_val.has_value());
+                note_opt("aniso_max_ratio", aniso_max_ratio_val.has_value());
+                note_opt("aniso_weight", aniso_weight_val.has_value());
+                note_opt("aniso_start", aniso_start_val.has_value());
                 note_opt("pose_lr_deg", pose_lr_deg_val.has_value());
                 note_opt("pose_lr_units", pose_lr_units_val.has_value());
                 note_opt("pose_opt_start", pose_opt_start_val.has_value());

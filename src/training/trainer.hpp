@@ -984,6 +984,8 @@ namespace lfs::training {
         float footprint_lambda_auto_ = -1.0f;
         // --grad-scale-near (LFQPLCYKMGS): [visible splats, splats with s < 1, sum of their s] of the logged step
         core::Tensor fused_near_stats_;
+        // --aniso-max-ratio (LFQPLCYKMAN): [splats, splats over r, loss] of the logged step
+        core::Tensor fused_aniso_stats_;
         core::Tensor fused_erank_reg_loss_;
         core::Tensor fused_dc_reg_loss_;
         core::Tensor fused_sh_rest_reg_loss_;

@@ -312,6 +312,17 @@ namespace lfs::core {
             float aniso_max_ratio = 0.0f;
             float aniso_weight = 0.0f;
             size_t aniso_start = 0;
+            // --thick-max-ratio R / --thick-weight lambda / --thick-start iter (LFQPLCYKMT; a THICKNESS FLOOR: PhysGaussian's
+            // anisotropy term on the thin axis, in log form): loss = lambda x mean over splats of max(0, ln(s_mid / s_min) - ln R),
+            // s = the 3 activated (exp) scales. Paper-thin discs (s_min << s_mid) pay; round splats and needles cost nothing.
+            // The log form keeps the per-splat gradient bounded (+-lambda / N), whatever the ratio (the recipe has splats at 1e15).
+            // FastGS fused path only. R = 0 = off.
+            float thick_max_ratio = 0.0f;
+            float thick_weight = 0.0f;
+            size_t thick_start = 0;
+            // --thick-longest: the thickness against the LONGEST axis instead, max(0, ln(s_max / s_min) - ln R): bounds every
+            // projected aspect by ~R (an edge-on disc's on-screen length is its s_max side, not s_mid).
+            bool thick_longest = false;
             float min_opacity = 0.005f;
             size_t refine_every = 100;
             size_t start_refine = 500;

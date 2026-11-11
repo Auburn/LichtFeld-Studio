@@ -57,6 +57,8 @@ namespace lfs::app {
     int run_lfe_gradnear_tool(int argc, const char* const* argv);
     // Developer check of the anti-needle loss, --aniso-max-ratio (lfe_aniso_tool.cpp; LFQPLCYKMAN).
     int run_lfe_aniso_tool(int argc, const char* const* argv);
+    // Developer check of the thickness floor, --thick-max-ratio (lfe_thick_tool.cpp; LFQPLCYKMT).
+    int run_lfe_thick_tool(int argc, const char* const* argv);
     // LFQPLCYR: headless batch rendering through the trainer's renderer, for the scorers (lfe_render_tool.cpp).
     int run_lfe_render_tool(int argc, const char* const* argv);
     // LFQPLCYR: test-camera registration against a frozen model with the trainer's renderer (lfe_render_tool.cpp).
@@ -284,6 +286,8 @@ int main(int argc, char* argv[]) {
         return lfs::app::run_lfe_gradnear_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-aniso")
         return lfs::app::run_lfe_aniso_tool(argc, argv);
+    if (argc >= 2 && std::string(argv[1]) == "lfe-thick")
+        return lfs::app::run_lfe_thick_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-render")
         return lfs::app::run_lfe_render_tool(argc, argv);
     if (argc >= 2 && std::string(argv[1]) == "lfe-register")

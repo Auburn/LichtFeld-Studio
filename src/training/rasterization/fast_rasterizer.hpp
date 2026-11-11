@@ -205,6 +205,13 @@ namespace lfs::training {
         float aniso_weight = 0.0f;
         float* aniso_loss_out = nullptr;
         float* aniso_stats_out = nullptr;
+        // --thick-max-ratio R / --thick-weight lambda (LFQPLCYKMT; FusedAdamSettings::thick_*): R = 0 = off.
+        // loss_out: optional device scalar (caller zeros) += lambda x mean log excess; stats_out: optional [2] += splats, += splats over R
+        float thick_max_ratio = 0.0f;
+        float thick_weight = 0.0f;
+        float* thick_loss_out = nullptr;
+        float* thick_stats_out = nullptr;
+        bool thick_longest = false; // --thick-longest: against s_max instead of s_mid
         // Optional edge guidance folded into the main blend backward. The map
         // is a median-normalized row-major float32 [H,W], and the destination
         // is a zeroed float32 [N] per-view scratch vector.

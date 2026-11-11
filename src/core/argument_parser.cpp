@@ -109,6 +109,10 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--aniso-max-ratio", "aniso_max_ratio", Float},
             OptimizationCliBinding{"--aniso-weight", "aniso_weight", Float},
             OptimizationCliBinding{"--aniso-start", "aniso_start", Integer},
+            OptimizationCliBinding{"--thick-max-ratio", "thick_max_ratio", Float},
+            OptimizationCliBinding{"--thick-weight", "thick_weight", Float},
+            OptimizationCliBinding{"--thick-start", "thick_start", Integer},
+            OptimizationCliBinding{"--thick-longest", "thick_longest", Bool},
             OptimizationCliBinding{"--pose-lr-deg", "pose_lr_deg", Float},
             OptimizationCliBinding{"--pose-lr-units", "pose_lr_units", Float},
             OptimizationCliBinding{"--pose-opt-start", "pose_opt_start", Integer},
@@ -926,6 +930,10 @@ namespace {
             ::args::ValueFlag<float> aniso_max_ratio(training_group, "r", lfs::core::args::optimization_cli_help("--aniso-max-ratio"), {"aniso-max-ratio"});
             ::args::ValueFlag<float> aniso_weight(training_group, "lambda", lfs::core::args::optimization_cli_help("--aniso-weight"), {"aniso-weight"});
             ::args::ValueFlag<int> aniso_start(training_group, "iter", lfs::core::args::optimization_cli_help("--aniso-start"), {"aniso-start"});
+            ::args::ValueFlag<float> thick_max_ratio(training_group, "R", lfs::core::args::optimization_cli_help("--thick-max-ratio"), {"thick-max-ratio"});
+            ::args::ValueFlag<float> thick_weight(training_group, "lambda", lfs::core::args::optimization_cli_help("--thick-weight"), {"thick-weight"});
+            ::args::ValueFlag<int> thick_start(training_group, "iter", lfs::core::args::optimization_cli_help("--thick-start"), {"thick-start"});
+            ::args::Flag thick_longest(training_group, "enabled", lfs::core::args::optimization_cli_help("--thick-longest"), {"thick-longest"});
             ::args::ValueFlag<float> pose_lr_deg(training_group, "deg", lfs::core::args::optimization_cli_help("--pose-lr-deg"), {"pose-lr-deg"});
             ::args::ValueFlag<float> pose_lr_units(training_group, "units", lfs::core::args::optimization_cli_help("--pose-lr-units"), {"pose-lr-units"});
             ::args::ValueFlag<int> pose_opt_start(training_group, "iter", lfs::core::args::optimization_cli_help("--pose-opt-start"), {"pose-opt-start"});
@@ -1634,6 +1642,16 @@ namespace {
             if (aniso_start && ::args::get(aniso_start) < 0) {
                 return std::unexpected("ERROR: --aniso-start must be >= 0");
             }
+            if (thick_max_ratio && (!std::isfinite(::args::get(thick_max_ratio)) || (::args::get(thick_max_ratio) != 0.0f &&
+                                    (::args::get(thick_max_ratio) < 1.0f || ::args::get(thick_max_ratio) > 1e6f)))) {
+                return std::unexpected("ERROR: --thick-max-ratio must be 0 (off) or within [1, 1e6]");
+            }
+            if (thick_weight && (!std::isfinite(::args::get(thick_weight)) || ::args::get(thick_weight) < 0.0f || ::args::get(thick_weight) > 1e6f)) {
+                return std::unexpected("ERROR: --thick-weight must be within [0, 1e6]");
+            }
+            if (thick_start && ::args::get(thick_start) < 0) {
+                return std::unexpected("ERROR: --thick-start must be >= 0");
+            }
             if ((loss_footprint_start && ::args::get(loss_footprint_start) < 0) || (loss_footprint_ramp && ::args::get(loss_footprint_ramp) < 0)) {
                 return std::unexpected("ERROR: --loss-footprint-start / --loss-footprint-ramp must be >= 0");
             }
@@ -1810,6 +1828,10 @@ namespace {
                                         aniso_max_ratio_val = cli_option_present({"--aniso-max-ratio"}) ? std::optional<float>(::args::get(aniso_max_ratio)) : std::optional<float>(),
                                         aniso_weight_val = cli_option_present({"--aniso-weight"}) ? std::optional<float>(::args::get(aniso_weight)) : std::optional<float>(),
                                         aniso_start_val = cli_option_present({"--aniso-start"}) ? std::optional<int>(::args::get(aniso_start)) : std::optional<int>(),
+                                        thick_max_ratio_val = cli_option_present({"--thick-max-ratio"}) ? std::optional<float>(::args::get(thick_max_ratio)) : std::optional<float>(),
+                                        thick_weight_val = cli_option_present({"--thick-weight"}) ? std::optional<float>(::args::get(thick_weight)) : std::optional<float>(),
+                                        thick_start_val = cli_option_present({"--thick-start"}) ? std::optional<int>(::args::get(thick_start)) : std::optional<int>(),
+                                        thick_longest_flag = bool(thick_longest),
                                         pose_lr_deg_val = cli_option_present({"--pose-lr-deg"}) ? std::optional<float>(::args::get(pose_lr_deg)) : std::optional<float>(),
                                         pose_lr_units_val = cli_option_present({"--pose-lr-units"}) ? std::optional<float>(::args::get(pose_lr_units)) : std::optional<float>(),
                                         pose_opt_start_val = cli_option_present({"--pose-opt-start"}) ? std::optional<int>(::args::get(pose_opt_start)) : std::optional<int>(),
@@ -2071,6 +2093,12 @@ namespace {
                 setVal(aniso_weight_val, opt.aniso_weight);
                 if (aniso_start_val)
                     opt.aniso_start = static_cast<size_t>(*aniso_start_val);
+                setVal(thick_max_ratio_val, opt.thick_max_ratio);
+                setVal(thick_weight_val, opt.thick_weight);
+                if (thick_start_val)
+                    opt.thick_start = static_cast<size_t>(*thick_start_val);
+                if (thick_longest_flag)
+                    opt.thick_longest = true;
                 setVal(pose_lr_deg_val, opt.pose_lr_deg);
                 setVal(pose_lr_units_val, opt.pose_lr_units);
                 if (pose_opt_start_val)
@@ -2303,6 +2331,10 @@ namespace {
                 note_opt("aniso_max_ratio", aniso_max_ratio_val.has_value());
                 note_opt("aniso_weight", aniso_weight_val.has_value());
                 note_opt("aniso_start", aniso_start_val.has_value());
+                note_opt("thick_max_ratio", thick_max_ratio_val.has_value());
+                note_opt("thick_weight", thick_weight_val.has_value());
+                note_opt("thick_start", thick_start_val.has_value());
+                note_opt("thick_longest", thick_longest_flag);
                 note_opt("pose_lr_deg", pose_lr_deg_val.has_value());
                 note_opt("pose_lr_units", pose_lr_units_val.has_value());
                 note_opt("pose_opt_start", pose_opt_start_val.has_value());

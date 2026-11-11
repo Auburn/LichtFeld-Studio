@@ -101,6 +101,17 @@ namespace fast_lfs::rasterization {
         float aniso_weight = 0.0f;
         float* aniso_loss_out = nullptr;  // optional: += the loss (lambda x mean excess)
         float* aniso_stats_out = nullptr; // optional [2]: += splats, += splats with rho > r
+        // --thick-max-ratio R / --thick-weight lambda (LFQPLCYKMT; a thickness floor, PhysGaussian's anisotropy term on the THIN axis
+        // in log form): a per-splat regulariser like erank, evaluated for EVERY splat (visible or not) once per step:
+        // loss = lambda / N x sum max(0, (l_mid - l_min) - ln R), l = the log-scales (s = exp(l)): ln(s_mid / s_min) over ln R.
+        // Gradient into the log-scales only: d/dl_mid = +c, d/dl_min = -c (c = lambda / N) for splats over R; zero otherwise.
+        // Bounded whatever the ratio (paper-thin discs reach s_mid / s_min ~ 1e15). Not scaled by --grad-scale-near. R = 0 = off.
+        float thick_max_ratio = 0.0f; // R (> 0 = on)
+        float thick_log_ratio = 0.0f; // ln R (set with it)
+        float thick_weight = 0.0f;
+        float* thick_loss_out = nullptr;  // optional: += the loss (lambda x mean log excess)
+        float* thick_stats_out = nullptr; // optional [2]: += splats, += splats with s_ref / s_min > R
+        bool thick_longest = false;       // --thick-longest: s_ref = s_max (d/dl_max = +c) instead of s_mid
 
         FusedAdamParam means;
         FusedAdamParam scaling;

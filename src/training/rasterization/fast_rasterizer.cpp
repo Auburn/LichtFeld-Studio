@@ -103,6 +103,15 @@ namespace lfs::training {
             fused_adam.aniso_loss_out = fused_extra_gradients.aniso_loss_out;
             fused_adam.aniso_stats_out = fused_extra_gradients.aniso_stats_out;
         }
+        // --thick-max-ratio (LFQPLCYKMT): 0 = off: the kernels read nothing of it
+        if (fused_extra_gradients.thick_max_ratio > 0.0f) { // weight 0 = count only (logged before --thick-start)
+            fused_adam.thick_log_ratio = std::log(fused_extra_gradients.thick_max_ratio);
+            fused_adam.thick_max_ratio = fused_extra_gradients.thick_max_ratio;
+            fused_adam.thick_weight = fused_extra_gradients.thick_weight;
+            fused_adam.thick_loss_out = fused_extra_gradients.thick_loss_out;
+            fused_adam.thick_stats_out = fused_extra_gradients.thick_stats_out;
+            fused_adam.thick_longest = fused_extra_gradients.thick_longest;
+        }
         fused_adam.means = convert_param(optimizer_fused.means);
         fused_adam.scaling = convert_param(optimizer_fused.scaling);
         fused_adam.rotation = convert_param(optimizer_fused.rotation);

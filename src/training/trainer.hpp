@@ -986,6 +986,8 @@ namespace lfs::training {
         core::Tensor fused_near_stats_;
         // --aniso-max-ratio (LFQPLCYKMAN): [splats, splats over r, loss] of the logged step
         core::Tensor fused_aniso_stats_;
+        // --thick-max-ratio (LFQPLCYKMT): [splats, splats over R, loss] of the logged step
+        core::Tensor fused_thick_stats_;
         core::Tensor fused_erank_reg_loss_;
         core::Tensor fused_dc_reg_loss_;
         core::Tensor fused_sh_rest_reg_loss_;

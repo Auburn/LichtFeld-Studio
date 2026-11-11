@@ -484,6 +484,36 @@ namespace lfs::core::param {
             .ui_step(1000)
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .float_prop(&OptimizationParameters::thick_max_ratio,
+                        "thick_max_ratio", "Thickness Floor Max Ratio", d.thick_max_ratio, 0.0f, 1000000.0f,
+                        "Thickness floor (against paper-thin discs that draw as hairlines edge-on): per splat max(0, ln(s_mid / s_min) - ln R) "
+                        "of its activated scales, averaged over splats, x --thick-weight; R = the allowed middle-to-smallest scale ratio; 0 = off")
+            .precision(2)
+            .ui_step(1.0)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .float_prop(&OptimizationParameters::thick_weight,
+                        "thick_weight", "Thickness Floor Weight", d.thick_weight, 0.0f, 1000000.0f,
+                        "lambda of the thickness floor (--thick-max-ratio): loss = lambda x mean over splats of max(0, ln(s_mid / s_min) - ln R)")
+            .precision(3)
+            .ui_step(0.1)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .size_prop(&OptimizationParameters::thick_start,
+                       "thick_start", "Thickness Floor Start", d.thick_start, 0, 1000000,
+                       "Iteration from which the thickness floor (--thick-max-ratio) is active")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
+            .bool_prop(&OptimizationParameters::thick_longest,
+                       "thick_longest", "Thickness Floor vs Longest Axis", d.thick_longest,
+                       "Measure the thickness floor (--thick-max-ratio) against the longest axis, ln(s_max / s_min), instead of the middle one: "
+                       "bounds every splat's projected aspect by about R")
+            .precision(0)
+            .ui_step(1000)
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .bool_prop(&OptimizationParameters::loss_footprint_opacity,
                        "loss_footprint_opacity", "Footprint Loss Opacity Gradient", d.loss_footprint_opacity,
                        "Also send the footprint loss gradient into the opacity, through the quad reach (shaped splats whose alpha-floor "

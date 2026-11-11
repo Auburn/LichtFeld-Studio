@@ -982,6 +982,18 @@ namespace lfs::core {
                 return "--aniso-max-ratio is implemented for the standard (FastGS) rasterizer, not --gut";
             if (aniso_start > MAX_ITERATION_VALUE)
                 return std::format("aniso_start must be within [0, {}]", MAX_ITERATION_VALUE);
+            if (!std::isfinite(thick_max_ratio) || (thick_max_ratio != 0.0f && (thick_max_ratio < 1.0f || thick_max_ratio > 1e6f)))
+                return std::format("thick_max_ratio must be 0 (off) or within [1, 1e6] (got {})", thick_max_ratio);
+            if (!std::isfinite(thick_weight) || thick_weight < 0.0f || thick_weight > 1e6f)
+                return std::format("thick_weight must be within [0, 1e6] (got {})", thick_weight);
+            if (thick_max_ratio > 0.0f && !(thick_weight > 0.0f))
+                return "--thick-max-ratio needs --thick-weight LAMBDA > 0";
+            if (thick_max_ratio > 0.0f && gut)
+                return "--thick-max-ratio is implemented for the standard (FastGS) rasterizer, not --gut";
+            if (thick_longest && !(thick_max_ratio > 0.0f))
+                return "--thick-longest needs --thick-max-ratio R";
+            if (thick_start > MAX_ITERATION_VALUE)
+                return std::format("thick_start must be within [0, {}]", MAX_ITERATION_VALUE);
             if (loss_footprint_start > MAX_ITERATION_VALUE || loss_footprint_ramp > MAX_ITERATION_VALUE)
                 return std::format("loss_footprint_start / loss_footprint_ramp must be within [0, {}]", MAX_ITERATION_VALUE);
             if (max_std_dev > 0.0f && gut)

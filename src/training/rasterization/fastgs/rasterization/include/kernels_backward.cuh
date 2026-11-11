@@ -117,6 +117,7 @@ namespace fast_lfs::rasterization::kernels::backward {
         float dc_loss_local = 0.0f;
         float erank_grads[3] = {0.0f, 0.0f, 0.0f};
         float aniso_loss_local = 0.0f, aniso_over_local = 0.0f; // --aniso-max-ratio (LFQPLCYKMAN)
+        float thick_loss_local = 0.0f, thick_over_local = 0.0f; // --thick-max-ratio (LFQPLCYKMT)
         if (in_range) {
             if (fused_adam.scale_reg_loss_out != nullptr &&
                 fused_adam.scale_reg_weight > 0.0f &&
@@ -174,6 +175,30 @@ namespace fast_lfs::rasterization::kernels::backward {
                     }
                     aniso_over_local = over ? 1.0f : 0.0f;
                 }
+                // --thick-max-ratio (LFQPLCYKMT; fused_adam_types.h): lambda / N x max(0, ln(s_mid / s_min) - ln R) on the log-scales,
+                // added to the erank slot. imin = the smallest log-scale (the first of equal axes), imid = the smaller of the other two
+                // (the first on a tie). The excess is a difference of log-scales: no exp, no overflow, whatever the ratio.
+                if (fused_adam.thick_max_ratio > 0.0f && fused_adam.scaling.n_primitives > 0) {
+                    const uint tb = static_cast<uint>(primitive_idx) * 3u;
+                    const float l[3] = {fused_adam.scaling.param[tb], fused_adam.scaling.param[tb + 1u], fused_adam.scaling.param[tb + 2u]};
+                    int imin = 0;
+                    if (l[1] < l[imin]) imin = 1;
+                    if (l[2] < l[imin]) imin = 2;
+                    const int b1 = (imin + 1) % 3, b2 = (imin + 2) % 3;
+                    const int imid = l[b1] <= l[b2] ? b1 : b2;
+                    const int iref = fused_adam.thick_longest ? (imid == b1 ? b2 : b1) : imid; // --thick-longest: the largest
+                    const float excess = (l[iref] - l[imin]) - fused_adam.thick_log_ratio;
+                    const bool over = excess > 0.0f;
+                    if (over) {
+                        const float c = fused_adam.thick_weight / static_cast<float>(fused_adam.scaling.n_primitives);
+                        thick_loss_local = c * excess;
+                        if (c > 0.0f) { // weight 0 (the count-only binding): no gradient term at all
+                            erank_grads[iref] += c;
+                            erank_grads[imin] -= c;
+                        }
+                    }
+                    thick_over_local = over ? 1.0f : 0.0f;
+                }
             }
             if (fused_adam.opacity_reg_loss_out != nullptr &&
                 fused_adam.opacity_reg_weight > 0.0f &&
@@ -228,6 +253,19 @@ namespace fast_lfs::rasterization::kernels::backward {
                 if (threadIdx.x == 0) {
                     atomicAdd(fused_adam.aniso_stats_out, n_sum);
                     atomicAdd(fused_adam.aniso_stats_out + 1, o_sum);
+                }
+            }
+            if (fused_adam.thick_loss_out != nullptr) { // --thick-max-ratio (LFQPLCYKMT)
+                const float block_sum = lfs::core::warp_ops::block_reduce_sum(thick_loss_local);
+                if (threadIdx.x == 0 && block_sum != 0.0f)
+                    atomicAdd(fused_adam.thick_loss_out, block_sum);
+            }
+            if (fused_adam.thick_stats_out != nullptr) {
+                const float n_sum = lfs::core::warp_ops::block_reduce_sum(in_range ? 1.0f : 0.0f);
+                const float o_sum = lfs::core::warp_ops::block_reduce_sum(thick_over_local);
+                if (threadIdx.x == 0) {
+                    atomicAdd(fused_adam.thick_stats_out, n_sum);
+                    atomicAdd(fused_adam.thick_stats_out + 1, o_sum);
                 }
             }
         }

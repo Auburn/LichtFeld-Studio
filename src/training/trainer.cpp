@@ -3847,6 +3847,18 @@ namespace lfs::training {
                          params.optimization.aniso_max_ratio, params.optimization.aniso_weight, params.optimization.aniso_start,
                          500); // = kExtraLossLogInterval (defined further down)
             }
+            if (params.optimization.thick_max_ratio > 0.0f) {
+                // LFQPLCYKMT (fused into the FastGS preprocess backward as a per-splat log-scale prior; fused_adam_types.h)
+                LOG_INFO("Thickness floor (--thick-max-ratio {}, --thick-weight {}, --thick-start {}{}; LFQPLCYKMT, PhysGaussian's anisotropy "
+                         "term on the thin axis, log form): lambda x mean over all splats of max(0, ln({} / s_min) - ln R) on the "
+                         "activated scales, every step for every splat (visible or not); gradient +-lambda / N into the {} and smallest "
+                         "log-scales only (not beta, opacity, means or rotation); not scaled by --grad-scale-near; not added to the reported "
+                         "loss; share of splats over R logged every {} iterations",
+                         params.optimization.thick_max_ratio, params.optimization.thick_weight, params.optimization.thick_start,
+                         params.optimization.thick_longest ? ", --thick-longest" : "", params.optimization.thick_longest ? "s_max" : "s_mid",
+                         params.optimization.thick_longest ? "largest" : "middle",
+                         500); // = kExtraLossLogInterval (defined further down)
+            }
             if (params.optimization.distortion_weight > 0.0f) {
                 if (params.optimization.gut)
                     LOG_WARN("Depth distortion loss needs the standard rasterizer; ignored with --gut");
@@ -7230,6 +7242,7 @@ namespace lfs::training {
                 bool footprint_logged = false;
                 bool near_logged = false; // --grad-scale-near (LFQPLCYKMGS): its scalars bound this step
                 bool aniso_logged = false; // --aniso-max-ratio (LFQPLCYKMAN): its scalars bound this step
+                bool thick_logged = false; // --thick-max-ratio (LFQPLCYKMT): its scalars bound this step
                 long long footprint_n_instances = -1, footprint_n_visible = -1;
                 int footprint_w = 0, footprint_h = 0;
                 // Depth distortion (standard rasterizer, iterations with a Gaussian backward), from
@@ -7393,6 +7406,27 @@ namespace lfs::training {
                             fused_extra_gradients.aniso_stats_out = fused_aniso_stats_.ptr<float>();
                             fused_extra_gradients.aniso_loss_out = fused_aniso_stats_.ptr<float>() + 2;
                             aniso_logged = true;
+                        }
+                        // --thick-max-ratio (LFQPLCYKMT): from thick_start; loss and counts bound at the log cadence only
+                        if (step_params.thick_max_ratio > 0.0f && step_params.thick_weight > 0.0f && !step_params.gut &&
+                            static_cast<size_t>(iter) >= step_params.thick_start) {
+                            fused_extra_gradients.thick_max_ratio = step_params.thick_max_ratio;
+                            fused_extra_gradients.thick_weight = step_params.thick_weight;
+                            fused_extra_gradients.thick_longest = step_params.thick_longest;
+                        }
+                        if (step_params.thick_max_ratio > 0.0f && !step_params.gut && iter % kExtraLossLogInterval == 0) {
+                            // also before the start (weight 0 there: counts only), to log the share the floor will meet
+                            if (fused_extra_gradients.thick_max_ratio <= 0.0f) {
+                                fused_extra_gradients.thick_max_ratio = step_params.thick_max_ratio;
+                                fused_extra_gradients.thick_weight = 0.0f; // the kernel counts; its gradient terms are exactly 0
+                                fused_extra_gradients.thick_longest = step_params.thick_longest;
+                            }
+                            if (!fused_thick_stats_.is_valid())
+                                fused_thick_stats_ = lfs::core::Tensor::zeros({3}, lfs::core::Device::CUDA);
+                            fused_thick_stats_.zero_();
+                            fused_extra_gradients.thick_stats_out = fused_thick_stats_.ptr<float>();
+                            fused_extra_gradients.thick_loss_out = fused_thick_stats_.ptr<float>() + 2;
+                            thick_logged = true;
                         }
                         // --grad-scale-near (LFQPLCYKMGS): every FastGS backward of the run; the counts at the log cadence
                         if (step_params.grad_scale_near > 0.0f && !step_params.gut) {
@@ -9270,6 +9304,17 @@ namespace lfs::training {
                         const bool active = static_cast<size_t>(iter) >= step_params.aniso_start;
                         LOG_INFO("iter {}: anisotropy loss (r {}, lambda {}{}): {} of {} splats over r ({:.3f}%), loss {:.6f}",
                                  iter, step_params.aniso_max_ratio, step_params.aniso_weight, active ? "" : ", not started",
+                                 static_cast<long long>(v[1]), static_cast<long long>(v[0]),
+                                 v[0] > 0.0f ? 100.0 * v[1] / v[0] : 0.0, active ? v[2] : 0.0f);
+                    }
+                    if (thick_logged && fused_thick_stats_.is_valid()) {
+                        // --thick-max-ratio (LFQPLCYKMT): synchronous readback at the log cadence only
+                        const auto ts = fused_thick_stats_.cpu().contiguous();
+                        const float* v = ts.ptr<float>();
+                        const bool active = static_cast<size_t>(iter) >= step_params.thick_start;
+                        LOG_INFO("iter {}: thickness floor (R {}, lambda {}{}{}): {} of {} splats over R ({:.3f}%), loss {:.6f}",
+                                 iter, step_params.thick_max_ratio, step_params.thick_weight, step_params.thick_longest ? ", vs s_max" : "",
+                                 active ? "" : ", not started",
                                  static_cast<long long>(v[1]), static_cast<long long>(v[0]),
                                  v[0] > 0.0f ? 100.0 * v[1] / v[0] : 0.0, active ? v[2] : 0.0f);
                     }

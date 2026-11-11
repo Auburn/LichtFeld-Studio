@@ -235,6 +235,32 @@ namespace lfs::training {
                                                       settings.learn_start, settings.exposure_lr)
                                         : std::string("fixed"));
         }
+        // --rs-time-map (LFQPLCYKMR): the per-pixel readout-time map in place of the row rule
+        if (!settings.time_map.empty()) {
+            auto map = load_rs_time_map(settings.time_map);
+            if (!map)
+                return std::unexpected(map.error());
+            int cw = 0, ch = 0;
+            for (const auto& cam : cameras) {
+                if (!cam || rs->row_of_uid_.find(cam->uid()) == rs->row_of_uid_.end())
+                    continue;
+                if (const auto err = map->aspect_error(cam->image_width(), cam->image_height()); !err.empty())
+                    return std::unexpected(std::format("{} (training camera '{}')", err, cam->image_name()));
+                cw = cam->image_width();
+                ch = cam->image_height();
+            }
+            if (!map->radial) {
+                rs->time_map_ = device_alloc<float>(map->s.size(), &map->s);
+                if (!rs->time_map_)
+                    return std::unexpected("--rs-time-map: device allocation failed");
+            }
+            rs->time_map_host_ = *map;
+            rs->time_map_description_ = std::format(
+                "Rolling-shutter time map (--rs-time-map; LFQPLCYKMR): {}; each splat at the time of its centre's pixel "
+                "({}; the fixed point of {} re-projections), each background-cube pixel at its own; training cameras {} x {} "
+                "(the map's image scaled to them)",
+                map->describe(settings.readout_ms), map->radial ? "the radial form" : "bilinear between the grid nodes", settings.iters, cw, ch);
+        }
         (void)fisheye;
         return rs;
     }
@@ -244,7 +270,7 @@ namespace lfs::training {
                         static_cast<void*>(steps_), static_cast<void*>(readout_), static_cast<void*>(readout_state_),
                         static_cast<void*>(grad_), static_cast<void*>(nb_),
                         static_cast<void*>(exposure_), static_cast<void*>(exp_scale_), static_cast<void*>(exp_state_),
-                        static_cast<void*>(exp_grad_)})
+                        static_cast<void*>(exp_grad_), static_cast<void*>(time_map_)})
             if (p)
                 cudaFree(p);
     }
@@ -263,6 +289,8 @@ namespace lfs::training {
         rs.motion = motion_ + static_cast<size_t>(row) * 12;
         rs.readout = readout_;
         rs.iters = std::max(1, settings_.iters);
+        if (time_map_host_) // --rs-time-map (LFQPLCYKMR): the radial form's constants or the grid's device copy
+            time_map_host_->fill(rs, time_map_);
         if (motion_learning(iter) || readout_learning(iter)) {
             cudaMemsetAsync(grad_, 0, sizeof(float) * 13, stream);
             rs.grad = grad_;

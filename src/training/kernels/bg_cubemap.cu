@@ -185,7 +185,29 @@ namespace lfs::training::kernels {
             }
             if (v.motion != nullptr) {
                 const float H = v.sensor_height > 0.0f ? v.sensor_height : static_cast<float>(v.height);
-                const float s = fminf(fmaxf((vv + v.row_offset) / H - 0.5f, -0.5f), 0.5f);
+                float s;
+                if (v.time_radial != 0) { // --rs-time-map (LFQPLCYKMR), radial form: this pixel's own time (FastGS's time_map_s)
+                    const float x = 2.0f * fminf(fmaxf(u / static_cast<float>(v.width), 0.0f), 1.0f) - 1.0f - v.tr_cx;
+                    const float y = (2.0f * fminf(fmaxf((vv + v.row_offset) / H, 0.0f), 1.0f) - 1.0f) * v.tr_aspect - v.tr_cy;
+                    const float r2 = x * x + y * y;
+                    s = v.tr_k * y * (1.0f + r2 * (v.tr_a + r2 * (v.tr_b + r2 * v.tr_c))) - v.tr_s0;
+                } else if (v.time_map != nullptr) { // --rs-time-map, grid form: this pixel's own time (FastGS's time_map_s)
+                    const int nx = v.time_map_nx, ny = v.time_map_ny;
+                    const float gx = fminf(fmaxf(u / static_cast<float>(v.width), 0.0f), 1.0f) * static_cast<float>(nx - 1);
+                    const float gy = fminf(fmaxf((vv + v.row_offset) / H, 0.0f), 1.0f) * static_cast<float>(ny - 1);
+                    const int i0 = min(static_cast<int>(gx), nx - 2);
+                    const int j0 = min(static_cast<int>(gy), ny - 2);
+                    const float ax = gx - static_cast<float>(i0);
+                    const float ay = gy - static_cast<float>(j0);
+                    const float* r0 = v.time_map + static_cast<size_t>(j0) * static_cast<size_t>(nx) + static_cast<size_t>(i0);
+                    const float* r1 = r0 + nx;
+                    const float s00 = __ldg(r0), s10 = __ldg(r0 + 1), s01 = __ldg(r1), s11 = __ldg(r1 + 1);
+                    const float a = s00 + ax * (s10 - s00);
+                    const float b = s01 + ax * (s11 - s01);
+                    s = a + ay * (b - a);
+                } else {
+                    s = fminf(fmaxf((vv + v.row_offset) / H - 0.5f, -0.5f), 0.5f);
+                }
                 const float t = s * __ldg(v.readout);
                 const float h = 0.5f * t * t;
                 const float3 r = make_float3(__ldg(v.motion + 0) * t + __ldg(v.motion + 3) * h,

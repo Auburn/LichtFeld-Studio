@@ -438,7 +438,7 @@ namespace fast_lfs::rasterization::kernels::backward {
             (void)rs_s;
             if constexpr (RS) {
                 rs_motion = rolling_shutter::load_motion(rs);
-                rs_s = rolling_shutter::splat_rows<FISHEYE, RADIAL, BLUR>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows,
+                rs_s = rolling_shutter::splat_rows<FISHEYE, RADIAL, BLUR>(rs, rs_motion, lens, fx, fy, cx, cy, w, h, mean3d, w2c_rows,
                                                            static_cast<uint>(primitive_idx));
             }
             const float4 w2c_r3 = w2c_rows[2];

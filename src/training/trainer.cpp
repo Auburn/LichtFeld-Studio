@@ -3483,11 +3483,14 @@ namespace lfs::training {
                 rs_settings.exposure_lr = params.optimization.motion_blur_exposure_lr;
                 if (const char* it = std::getenv("LFS_RS_ITERS"); it != nullptr && *it)
                     rs_settings.iters = std::max(1, std::atoi(it));
+                rs_settings.time_map = params.optimization.rs_time_map; // --rs-time-map (LFQPLCYKMR); "" = the row rule
                 auto created = RollingShutterMotion::create(rs_settings, train_dataset_->get_cameras());
                 if (!created)
                     return std::unexpected(created.error());
                 rolling_shutter_ = std::move(*created);
                 LOG_INFO("{}", rolling_shutter_->description());
+                if (!rolling_shutter_->time_map_description().empty())
+                    LOG_INFO("{}", rolling_shutter_->time_map_description());
                 if (!rolling_shutter_->blur_description().empty())
                     LOG_INFO("{}", rolling_shutter_->blur_description());
                 if (!rolling_shutter_->blur_description().empty() && params.optimization.kernel_shape)
@@ -3565,7 +3568,9 @@ namespace lfs::training {
                          "by the rasterizer before the appearance model ({}), as the solid clear colour is",
                          cube_table != nullptr ? std::format("= the radial lens table {} (--lens-radial)", cube_table->path.string())
                                                : std::string("= each camera's own (k-polynomial / pinhole)"),
-                         rolling_shutter_ ? "on (each pixel's own row)" : "off",
+                         rolling_shutter_ ? (rolling_shutter_->has_time_map() ? "on (each pixel's own time from the --rs-time-map)"
+                                                                              : "on (each pixel's own row)")
+                                          : "off",
                          pose_refinement_ ? std::format("= the refined pose from iteration {} on (--pose-opt; the pose gradient "
                                                         "comes from the splats only, the background is held for it)",
                                                         pose_refinement_->settings().start)

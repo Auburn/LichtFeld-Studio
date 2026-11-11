@@ -38,6 +38,15 @@ namespace lfs::training::kernels {
         const float* readout = nullptr; // device [1] readout time tau (s); required with motion
         float row_offset = 0.0f;        // as FastGSRollingShutter (tiled renders; 0 here)
         float sensor_height = 0.0f;     // 0 = the render height
+        // --rs-time-map (LFQPLCYKMR): as FastGSRollingShutter's time fields (radial form, or s at a grid's nodes; neither =
+        // the row rule)
+        const float* time_map = nullptr;
+        int time_map_nx = 0;
+        int time_map_ny = 0;
+        int time_radial = 0;
+        float tr_k = 0.0f, tr_a = 0.0f, tr_b = 0.0f, tr_c = 0.0f, tr_cx = 0.0f, tr_cy = 0.0f;
+        float tr_aspect = 0.75f;
+        float tr_s0 = 0.0f;
     };
 
     // bg_chw [3, H, W] = cube(world direction of each pixel's ray).

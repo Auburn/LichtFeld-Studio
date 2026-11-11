@@ -1013,6 +1013,8 @@ namespace lfs::core {
                 return std::format("motion_blur_exposure_lr must be within (0, 1] (got {})", motion_blur_exposure_lr);
             if (motion_blur && rolling_shutter.empty())
                 return "--motion-blur needs --rolling-shutter (the per-frame motion it blurs along)";
+            if (!rs_time_map.empty() && rolling_shutter.empty())
+                return "--rs-time-map needs --rolling-shutter (the per-frame motion its times are read along)";
             if (motion_blur && mip_filter)
                 return "--motion-blur cannot be combined with --enable-mip (the mip filter's opacity compensation)";
             if (motion_blur_learn_exposure && !motion_blur)

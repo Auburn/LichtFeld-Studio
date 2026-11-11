@@ -349,6 +349,18 @@ namespace lfs::training {
             v.readout = rs.readout;
             v.row_offset = rs.row_offset;
             v.sensor_height = rs.sensor_height;
+            v.time_map = rs.time_map; // --rs-time-map (LFQPLCYKMR); neither form = the row rule
+            v.time_map_nx = rs.time_map_nx;
+            v.time_map_ny = rs.time_map_ny;
+            v.time_radial = rs.time_radial;
+            v.tr_k = rs.tr_k;
+            v.tr_a = rs.tr_a;
+            v.tr_b = rs.tr_b;
+            v.tr_c = rs.tr_c;
+            v.tr_cx = rs.tr_cx;
+            v.tr_cy = rs.tr_cy;
+            v.tr_aspect = rs.tr_aspect;
+            v.tr_s0 = rs.tr_s0;
         }
         const lfs::core::TensorShape shape{3, static_cast<size_t>(H), static_cast<size_t>(W)};
         if (!bg_.is_valid() || bg_.shape() != shape)

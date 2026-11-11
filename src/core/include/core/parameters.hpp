@@ -388,6 +388,11 @@ namespace lfs::core {
             // k-polynomial of every native-fisheye camera (the table's own camera only; others are an error). Empty = off.
             std::string lens_radial;
             float rs_readout_ms = 10.0f;
+            // --rs-time-map (LFQPLCYKMR, 11 Nov 2026): a per-pixel readout-time map (training/rs_time_map.hpp; made by
+            // D:/splat_work/rs_led/build_rs_map.py from a video of a 1 kHz LED) in place of the row rule: each splat is drawn
+            // at s = map(u, v) / (the map's linear-equivalent readout) of its centre's pixel (bilinear between the map's nodes),
+            // t = s x rs_readout_ms; the background cubemap's pixel rays likewise. Needs rolling_shutter. Empty = the row rule.
+            std::string rs_time_map;
             std::string rs_learn;
             float rs_lr = 0.05f;
             float rs_readout_lr = 0.002f;

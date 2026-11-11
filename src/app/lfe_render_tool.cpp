@@ -19,6 +19,10 @@
 //                              rasterizer (splats + (1 - alpha) cube) through the same lens / rolling shutter as the
 //                              splats, as in training (overrides --bg)
 //       --ppisp FILE           a PPISP state dump (ppisp_final.txt) for the post modes below
+//       --rs-time-map FILE     (LFQPLCYKMR) the trainer's --rs-time-map (training/rs_time_map.hpp: radial form or grid): every
+//                              request with a motion reads each splat (and each background-cube pixel) at the form's time of
+//                              its pixel, s = (t - t(centre)) / R, t = s x readout_ms, in place of the row rule; such a
+//                              request's camera must have the form's aspect. Without it: the row rule (unchanged)
 //     request defaults (each request may override them): --out DIR, --factor F, --readout-ms MS, --rotation-only,
 //       --post none|curve|curve_vig|frame, --save image,post,alpha,depth, --dtype f32|f16, --motion FILE (--colmap only),
 //       --names FILE (--colmap only: these image names)
@@ -44,7 +48,8 @@
 //       depth [H, W]     sum_i w_i d_i, NOT normalised by alpha; d = distance from the camera centre (fisheye / the
 //                        game lens) or camera z (pinhole)
 //
-//   LichtFeld-Studio lfe-register DS MODEL.ply OUT [STEPS [POSE_LR]] [--max-std-dev X] [--sh-degree D]
+//   LichtFeld-Studio lfe-register DS MODEL.ply OUT [STEPS [POSE_LR]] [--max-std-dev X] [--sh-degree D] [--rs-time-map FILE]
+//     (--rs-time-map, LFQPLCYKMR: the trainer's per-pixel readout time for the FC_RS motion; without it the row rule)
 //     Registers DS's cameras against the FROZEN model (the splats never move): the algorithm of abq/pose_opt_fish_fast.py
 //     as abq/register_test.py runs it (FC_FAST=1, FC_COLOR=affine, one camera per step, dense Adam over all cameras),
 //     with LichtFeld's forward and pose gradient (FastGSPose) in place of gsplat + the fused projection. The same
@@ -66,6 +71,7 @@
 #include "training/components/ppisp.hpp"
 #include "training/rasterization/fast_rasterizer.hpp"
 #include "training/rasterization/radial_lens_table.hpp"
+#include "training/rs_time_map.hpp"
 
 #include <algorithm>
 #include <array>
@@ -773,10 +779,14 @@ namespace lfs::app {
             float* d_readout = nullptr;
             int uid_counter = 100000;
             bool warned_equidistant = false;
+            // --rs-time-map (LFQPLCYKMR): the form (host) and a grid's row fractions on the device (no form = the row rule)
+            std::optional<lfs::training::RsTimeMap> time_map;
+            float* d_time_map = nullptr;
 
             ~Renderer() {
                 cudaFree(d_motion);
                 cudaFree(d_readout);
+                cudaFree(d_time_map);
             }
 
             void apply_sphere(const std::vector<double>& s) {
@@ -903,6 +913,11 @@ namespace lfs::app {
                     rs.motion = d_motion;
                     rs.readout = d_readout;
                     rs.iters = 2;
+                    if (time_map) { // --rs-time-map (LFQPLCYKMR)
+                        if (const auto err = time_map->aspect_error(W, H); !err.empty())
+                            throw std::runtime_error(err + " (request '" + id + "')");
+                        time_map->fill(rs, d_time_map);
+                    }
                 }
 
                 // splat subset, SH degree
@@ -1062,7 +1077,7 @@ namespace lfs::app {
         int render_main(int argc, const char* const* argv) {
             Renderer r;
             fs::path ply, cube_path, ppisp_path, views, colmap, motion_path, names_path;
-            std::string lens_radial;
+            std::string lens_radial, time_map_path;
             int sh_degree = -1;
             float max_std_dev = 0.0f;
             bool serve = false;
@@ -1095,6 +1110,7 @@ namespace lfs::app {
                 } else if (a == "--dtype") r.def.f16 = arg_value(i, argc, argv) == "f16";
                 else if (a == "--motion") motion_path = arg_value(i, argc, argv);
                 else if (a == "--names") names_path = arg_value(i, argc, argv);
+                else if (a == "--rs-time-map") time_map_path = arg_value(i, argc, argv);
                 else throw std::runtime_error("lfe-render: unknown option " + a);
             }
             if (ply.empty() || (!serve && views.empty() && colmap.empty()))
@@ -1125,6 +1141,18 @@ namespace lfs::app {
             if (!ppisp_path.empty()) {
                 load_ppisp(r.ppisp, ppisp_path);
                 r.have_ppisp = true;
+            }
+            if (!time_map_path.empty()) { // --rs-time-map (LFQPLCYKMR)
+                auto m = lfs::training::load_rs_time_map(time_map_path);
+                if (!m)
+                    throw std::runtime_error(m.error());
+                r.time_map = std::move(*m);
+                if (!r.time_map->radial) {
+                    cuda_ok(cudaMalloc(&r.d_time_map, r.time_map->s.size() * 4), "alloc");
+                    cuda_ok(cudaMemcpy(r.d_time_map, r.time_map->s.data(), r.time_map->s.size() * 4, cudaMemcpyHostToDevice), "time map");
+                }
+                std::println("rs time map (--rs-time-map; LFQPLCYKMR): {} [times shown at the default --readout-ms {:g}; each request's readout_ms applies]",
+                             r.time_map->describe(r.def.readout_ms), r.def.readout_ms);
             }
             auto run_one = [&](const json& rq, bool protocol) {
                 const auto t0 = std::chrono::steady_clock::now();
@@ -1434,11 +1462,13 @@ namespace lfs::app {
             std::vector<std::string> pos;
             float max_std_dev = 0.0f;
             int sh_degree = -1;
+            std::string time_map_path; // --rs-time-map (LFQPLCYKMR)
             for (int i = 2; i < argc; ++i) {
                 const std::string a = argv[i];
                 if (a == "--max-std-dev") max_std_dev = std::stof(arg_value(i, argc, argv));
                 else if (a == "--max-std-dev-distance") g_cut_distance = true;
                 else if (a == "--sh-degree") sh_degree = std::stoi(arg_value(i, argc, argv));
+                else if (a == "--rs-time-map") time_map_path = arg_value(i, argc, argv);
                 else pos.push_back(a);
             }
             if (pos.size() < 3)
@@ -1512,6 +1542,18 @@ namespace lfs::app {
                 }
                 std::println("dynamic rolling shutter (FC_RS): {} cameras, readout {:g} ms (LichtFeld's rolling-shutter kernels)",
                              N, readout_s * 1000.0f);
+            }
+            std::optional<lfs::training::RsTimeMap> time_map; // --rs-time-map (LFQPLCYKMR)
+            if (!time_map_path.empty()) {
+                if (rs_path.empty())
+                    throw std::runtime_error("lfe-register: --rs-time-map needs FC_RS (the motion its times are read along)");
+                auto m = lfs::training::load_rs_time_map(time_map_path);
+                if (!m)
+                    throw std::runtime_error(m.error());
+                if (const auto err = m->aspect_error(W, H); !err.empty())
+                    throw std::runtime_error(err);
+                time_map = std::move(*m);
+                std::println("rs time map (--rs-time-map; LFQPLCYKMR): {}", time_map->describe(readout_s * 1000.0f));
             }
 
             // background
@@ -1615,6 +1657,11 @@ namespace lfs::app {
             cuda_ok(cudaMalloc(&d_readout, 4), "alloc");
             cuda_ok(cudaMalloc(&d_acc, 28 * 8), "alloc");
             cuda_ok(cudaMemcpy(d_readout, &readout_s, 4, cudaMemcpyHostToDevice), "readout");
+            float* d_time_map = nullptr;
+            if (time_map && !time_map->radial) {
+                cuda_ok(cudaMalloc(&d_time_map, time_map->s.size() * 4), "alloc");
+                cuda_ok(cudaMemcpy(d_time_map, time_map->s.data(), time_map->s.size() * 4, cudaMemcpyHostToDevice), "time map");
+            }
             regk::LossWorkspace ws;
 
             std::println("warm start: translation steps x {:.3f} (the cold runs' normalised units)", t_scale);
@@ -1675,6 +1722,8 @@ namespace lfs::app {
                     rs.motion = d_motion;
                     rs.readout = d_readout;
                     rs.iters = 2;
+                    if (time_map) // --rs-time-map (LFQPLCYKMR)
+                        time_map->fill(rs, d_time_map);
                 }
                 fr::FastGSPose pose{};
                 pose.w2c = d_w2c;
@@ -1888,7 +1937,7 @@ namespace lfs::app {
                          checksum_end == checksum_start ? "unchanged" : "CHANGED", checksum_start, checksum_end);
             std::fflush(stdout);
             cudaFree(d_rgb); cudaFree(d_mask); cudaFree(d_photo); cudaFree(d_grad); cudaFree(d_w2c); cudaFree(d_cam);
-            cudaFree(d_pg); cudaFree(d_motion); cudaFree(d_readout); cudaFree(d_acc);
+            cudaFree(d_pg); cudaFree(d_motion); cudaFree(d_readout); cudaFree(d_acc); cudaFree(d_time_map);
             return 0;
         }
 

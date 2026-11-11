@@ -121,6 +121,25 @@ namespace fast_lfs::rasterization {
         float* grad_exposure = nullptr;        // device [1] optional: the backward adds dL/d(exposure scale) (caller zeros)
         float* smear = nullptr;                // device [N] optional (checks): |dmu| in pixels per drawn model splat
         float time_offset = 0.0f;              // seconds added to every splat's time (sub-exposure reference renders)
+        // --rs-time-map (LFQPLCYKMR, 11 Nov 2026): a per-pixel readout time in place of the row rule. A camera-space point
+        // imaged at (u, v) of this render is read at s(fu, fv), fu = u / render width, fv = (v + row_offset) / H (H as above;
+        // both clamped to [0, 1]: 0 = the image's left / top edge, 1 = its right / bottom edge, pixel-corner coordinates),
+        // and t = s tau. Two forms (training/rs_time_map.hpp):
+        //   time_radial != 0: the camera's radial remap of its sensor rows, x = 2 fu - 1 - tr_cx, y = (2 fv - 1) tr_aspect - tr_cy
+        //     (both in half image widths), s = tr_k y (1 + tr_a r^2 + tr_b r^4 + tr_c r^6) - tr_s0, r^2 = x^2 + y^2;
+        //   time_map != nullptr: device [time_map_ny * time_map_nx] s at grid nodes, node (i, j) at (i / (nx - 1), j / (ny - 1)),
+        //     bilinear between them.
+        // The host scales the time by 1 / (its linear-equivalent readout) and removes the centre's time, so tau keeps its
+        // meaning and t = 0 at the image centre (a linear form at readout R gives s = v / H - 1/2, the row rule). The backward
+        // holds each splat's time fixed as with the row rule (dL/dtau = s x ...). Neither set = the row rule, the unchanged
+        // arithmetic.
+        const float* time_map = nullptr;
+        int time_map_nx = 0;
+        int time_map_ny = 0;
+        int time_radial = 0;
+        float tr_k = 0.0f, tr_a = 0.0f, tr_b = 0.0f, tr_c = 0.0f, tr_cx = 0.0f, tr_cy = 0.0f;
+        float tr_aspect = 0.75f;
+        float tr_s0 = 0.0f;
     };
 } // namespace fast_lfs::rasterization
 

@@ -299,6 +299,11 @@ namespace lfs::core::param {
             .ui_step(1.0)
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .string_prop(&OptimizationParameters::rs_time_map,
+                         "rs_time_map", "Rolling Shutter Time Map", d.rs_time_map,
+                         "Per-pixel rolling-shutter readout-time map file (LFS_RS_TIME_MAP 1; D:/splat_work/rs_led/build_rs_map.py): each splat is drawn at the time of its centre's pixel, map / the map's linear-equivalent readout x --rs-readout-ms (bilinear between the nodes), in place of the row rule (row / H - 1/2) x readout; the background cubemap's pixel rays likewise. Needs --rolling-shutter; empty = the row rule")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .string_prop(&OptimizationParameters::rs_learn,
                          "rs_learn", "Rolling Shutter Learn", d.rs_learn,
                          "Rolling shutter quantities refined during training: comma list of omega, alpha, vel, acc, readout (empty = the motion file and readout are used as they are)")

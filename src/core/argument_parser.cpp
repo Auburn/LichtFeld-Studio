@@ -80,6 +80,7 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--rolling-shutter", "rolling_shutter", String},
             OptimizationCliBinding{"--lens-radial", "lens_radial", String},
             OptimizationCliBinding{"--rs-readout-ms", "rs_readout_ms", Float},
+            OptimizationCliBinding{"--rs-time-map", "rs_time_map", String},
             OptimizationCliBinding{"--rs-learn", "rs_learn", String, false, "; values: comma list of omega, alpha, vel, acc, readout"},
             OptimizationCliBinding{"--rs-lr", "rs_lr", Float},
             OptimizationCliBinding{"--rs-readout-lr", "rs_readout_lr", Float},
@@ -901,6 +902,7 @@ namespace {
             ::args::ValueFlag<std::string> rolling_shutter(training_group, "file", lfs::core::args::optimization_cli_help("--rolling-shutter"), {"rolling-shutter"});
             ::args::ValueFlag<std::string> lens_radial(training_group, "file", lfs::core::args::optimization_cli_help("--lens-radial"), {"lens-radial"});
             ::args::ValueFlag<float> rs_readout_ms(training_group, "ms", lfs::core::args::optimization_cli_help("--rs-readout-ms"), {"rs-readout-ms"});
+            ::args::ValueFlag<std::string> rs_time_map(training_group, "file", lfs::core::args::optimization_cli_help("--rs-time-map"), {"rs-time-map"});
             ::args::ValueFlag<std::string> rs_learn(training_group, "list", lfs::core::args::optimization_cli_help("--rs-learn"), {"rs-learn"});
             ::args::ValueFlag<float> rs_lr(training_group, "px", lfs::core::args::optimization_cli_help("--rs-lr"), {"rs-lr"});
             ::args::ValueFlag<float> rs_readout_lr(training_group, "ms", lfs::core::args::optimization_cli_help("--rs-readout-lr"), {"rs-readout-lr"});
@@ -1799,6 +1801,7 @@ namespace {
                                         rolling_shutter_val = cli_option_present({"--rolling-shutter"}) ? std::optional<std::string>(::args::get(rolling_shutter)) : std::optional<std::string>(),
                                         lens_radial_val = cli_option_present({"--lens-radial"}) ? std::optional<std::string>(::args::get(lens_radial)) : std::optional<std::string>(),
                                         rs_readout_ms_val = cli_option_present({"--rs-readout-ms"}) ? std::optional<float>(::args::get(rs_readout_ms)) : std::optional<float>(),
+                                        rs_time_map_val = cli_option_present({"--rs-time-map"}) ? std::optional<std::string>(::args::get(rs_time_map)) : std::optional<std::string>(),
                                         rs_learn_val = cli_option_present({"--rs-learn"}) ? std::optional<std::string>(::args::get(rs_learn)) : std::optional<std::string>(),
                                         rs_lr_val = cli_option_present({"--rs-lr"}) ? std::optional<float>(::args::get(rs_lr)) : std::optional<float>(),
                                         rs_readout_lr_val = cli_option_present({"--rs-readout-lr"}) ? std::optional<float>(::args::get(rs_readout_lr)) : std::optional<float>(),
@@ -2051,6 +2054,10 @@ namespace {
                                           ? std::string{}
                                           : lfs::core::path_to_utf8(absolute_input_path(*lens_radial_val));
                 setVal(rs_readout_ms_val, opt.rs_readout_ms);
+                if (rs_time_map_val)
+                    opt.rs_time_map = rs_time_map_val->empty()
+                                          ? std::string{}
+                                          : lfs::core::path_to_utf8(absolute_input_path(*rs_time_map_val));
                 setVal(rs_learn_val, opt.rs_learn);
                 setVal(rs_lr_val, opt.rs_lr);
                 setVal(rs_readout_lr_val, opt.rs_readout_lr);
@@ -2302,6 +2309,7 @@ namespace {
                 note_opt("rolling_shutter", rolling_shutter_val.has_value());
                 note_opt("lens_radial", lens_radial_val.has_value());
                 note_opt("rs_readout_ms", rs_readout_ms_val.has_value());
+                note_opt("rs_time_map", rs_time_map_val.has_value());
                 note_opt("rs_learn", rs_learn_val.has_value());
                 note_opt("rs_lr", rs_lr_val.has_value());
                 note_opt("rs_readout_lr", rs_readout_lr_val.has_value());

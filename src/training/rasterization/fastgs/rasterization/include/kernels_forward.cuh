@@ -127,7 +127,7 @@ namespace fast_lfs::rasterization::kernels::forward {
         (void)rs_s;
         if constexpr (RS) {
             rs_motion = rolling_shutter::load_motion(rs);
-            rs_s = rolling_shutter::splat_rows<FISHEYE, RADIAL, BLUR>(rs, rs_motion, lens, fy, cy, h, mean3d, w2c_rows, primitive_idx);
+            rs_s = rolling_shutter::splat_rows<FISHEYE, RADIAL, BLUR>(rs, rs_motion, lens, fx, fy, cx, cy, w, h, mean3d, w2c_rows, primitive_idx);
             if (rs.times != nullptr && rs.times_fixed == 0 && active)
                 rs.times[primitive_idx] = rs_s;
         }

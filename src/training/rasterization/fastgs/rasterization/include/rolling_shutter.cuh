@@ -88,10 +88,53 @@ namespace fast_lfs::rasterization::kernels::rolling_shutter {
         return true;
     }
 
+    // --rs-time-map (LFQPLCYKMR): the pixel (u, v) where camera-space p is imaged; false if p is not in front (as row_of).
+    template <bool FISHEYE, bool RADIAL = false>
+    __device__ __forceinline__ bool pixel_of(const FastGSLens& lens, const float fx, const float fy, const float cx, const float cy,
+                                             const float3 p, float& u, float& v) {
+        if (!(p.z > 0.0f))
+            return false;
+        if constexpr (FISHEYE) {
+            const auto tm = fisheye::terms_lens<false, RADIAL>(lens, p.x * p.x + p.y * p.y, p.z);
+            u = fx * p.x * tm.h + cx;
+            v = fy * p.y * tm.h + cy;
+        } else {
+            u = fx * p.x / p.z + cx;
+            v = fy * p.y / p.z + cy;
+        }
+        return true;
+    }
+
+    // --rs-time-map: s at the normalised image position (fu, fv) (0..1 across the image, pixel-corner coordinates), the
+    // position clamped to the image (the row rule clamps s to [-1/2, 1/2] the same way): the radial form, or bilinear
+    // between the grid's nodes (FastGSRollingShutter).
+    __device__ __forceinline__ float time_map_s(const FastGSRollingShutter& rs, const float fu, const float fv) {
+        if (rs.time_radial != 0) {
+            const float x = 2.0f * fminf(fmaxf(fu, 0.0f), 1.0f) - 1.0f - rs.tr_cx;
+            const float y = (2.0f * fminf(fmaxf(fv, 0.0f), 1.0f) - 1.0f) * rs.tr_aspect - rs.tr_cy;
+            const float r2 = x * x + y * y;
+            return rs.tr_k * y * (1.0f + r2 * (rs.tr_a + r2 * (rs.tr_b + r2 * rs.tr_c))) - rs.tr_s0;
+        }
+        const int nx = rs.time_map_nx, ny = rs.time_map_ny;
+        const float gx = fminf(fmaxf(fu, 0.0f), 1.0f) * static_cast<float>(nx - 1);
+        const float gy = fminf(fmaxf(fv, 0.0f), 1.0f) * static_cast<float>(ny - 1);
+        const int i0 = min(static_cast<int>(gx), nx - 2);
+        const int j0 = min(static_cast<int>(gy), ny - 2);
+        const float ax = gx - static_cast<float>(i0);
+        const float ay = gy - static_cast<float>(j0);
+        const float* r0 = rs.time_map + static_cast<size_t>(j0) * static_cast<size_t>(nx) + static_cast<size_t>(i0);
+        const float* r1 = r0 + nx;
+        const float s00 = __ldg(r0), s10 = __ldg(r0 + 1), s01 = __ldg(r1), s11 = __ldg(r1 + 1);
+        const float a = s00 + ax * (s10 - s00);
+        const float b = s01 + ax * (s11 - s01);
+        return a + ay * (b - a);
+    }
+
     // splat_rows with every pose at s tau + rs.time_offset (--motion-blur's sub-exposure reference renders; checks only).
     template <bool FISHEYE, bool RADIAL = false>
     __device__ __noinline__ float splat_rows_offset(const FastGSRollingShutter& rs, const Motion& m, const FastGSLens& lens,
-                                                    const float fy, const float cy, const float render_height,
+                                                    const float fx, const float fy, const float cx, const float cy,
+                                                    const float render_width, const float render_height,
                                                     const float3 mean, float4 rows[3], const uint primitive_idx) {
         const float3 pm = make_float3(
             rows[0].x * mean.x + rows[0].y * mean.y + rows[0].z * mean.z + rows[0].w,
@@ -104,10 +147,17 @@ namespace fast_lfs::rasterization::kernels::rolling_shutter {
             const float H = rs.sensor_height > 0.0f ? rs.sensor_height : render_height;
             float3 p = pm;
             for (int k = 0; k < rs.iters; ++k) {
-                float v;
-                if (!row_of<FISHEYE, RADIAL>(lens, fy, cy, p, v))
-                    break;
-                s = fminf(fmaxf((v + rs.row_offset) / H - 0.5f, -0.5f), 0.5f);
+                if (rs.time_map != nullptr || rs.time_radial != 0) { // --rs-time-map (LFQPLCYKMR): the time at the centre's pixel
+                    float u, v;
+                    if (!pixel_of<FISHEYE, RADIAL>(lens, fx, fy, cx, cy, p, u, v))
+                        break;
+                    s = time_map_s(rs, u / render_width, (v + rs.row_offset) / H);
+                } else {
+                    float v;
+                    if (!row_of<FISHEYE, RADIAL>(lens, fy, cy, p, v))
+                        break;
+                    s = fminf(fmaxf((v + rs.row_offset) / H - 0.5f, -0.5f), 0.5f);
+                }
                 if (k + 1 < rs.iters) {
                     float3 E[3], d;
                     pose_at(m, s * m.tau + rs.time_offset, E, d);
@@ -132,14 +182,17 @@ namespace fast_lfs::rasterization::kernels::rolling_shutter {
     }
 
     // Solves the splat's capture time and replaces rows (in: the mid-readout world-to-camera rows; out: the rows at the
-    // splat's time). Returns s, the row fraction (t = s tau, s in [-1/2, 1/2]).
+    // splat's time). Returns s, the row fraction (t = s tau, s in [-1/2, 1/2]; with --rs-time-map the map's s at the
+    // centre's pixel, which may reach slightly past +-1/2 in the corners).
     template <bool FISHEYE, bool RADIAL = false, bool BLUR = false>
     __device__ __forceinline__ float splat_rows(const FastGSRollingShutter& rs, const Motion& m, const FastGSLens& lens,
-                                                const float fy, const float cy, const float render_height,
+                                                const float fx, const float fy, const float cx, const float cy,
+                                                const float render_width, const float render_height,
                                                 const float3 mean, float4 rows[3], const uint primitive_idx) {
         if constexpr (BLUR) {
             if (rs.time_offset != 0.0f)
-                return splat_rows_offset<FISHEYE, RADIAL>(rs, m, lens, fy, cy, render_height, mean, rows, primitive_idx);
+                return splat_rows_offset<FISHEYE, RADIAL>(rs, m, lens, fx, fy, cx, cy, render_width, render_height, mean, rows,
+                                                          primitive_idx);
         }
         const float3 pm = make_float3(
             rows[0].x * mean.x + rows[0].y * mean.y + rows[0].z * mean.z + rows[0].w,
@@ -152,10 +205,17 @@ namespace fast_lfs::rasterization::kernels::rolling_shutter {
             const float H = rs.sensor_height > 0.0f ? rs.sensor_height : render_height;
             float3 p = pm;
             for (int k = 0; k < rs.iters; ++k) {
-                float v;
-                if (!row_of<FISHEYE, RADIAL>(lens, fy, cy, p, v))
-                    break;
-                s = fminf(fmaxf((v + rs.row_offset) / H - 0.5f, -0.5f), 0.5f);
+                if (rs.time_map != nullptr || rs.time_radial != 0) { // --rs-time-map (LFQPLCYKMR): the time at the centre's pixel
+                    float u, v;
+                    if (!pixel_of<FISHEYE, RADIAL>(lens, fx, fy, cx, cy, p, u, v))
+                        break;
+                    s = time_map_s(rs, u / render_width, (v + rs.row_offset) / H);
+                } else {
+                    float v;
+                    if (!row_of<FISHEYE, RADIAL>(lens, fy, cy, p, v))
+                        break;
+                    s = fminf(fmaxf((v + rs.row_offset) / H - 0.5f, -0.5f), 0.5f);
+                }
                 if (k + 1 < rs.iters) {
                     float3 E[3], d;
                     pose_at(m, s * m.tau, E, d);

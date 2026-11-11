@@ -17,10 +17,12 @@
 // stages it: the readout first (motion fixed), then the motion (readout fixed).
 
 #include "core/camera.hpp"
+#include "rs_time_map.hpp"
 #include <cuda_runtime.h>
 #include <expected>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -46,6 +48,8 @@ namespace lfs::training {
         // fixed). 0 = both from learn_start.
         int motion_start = 0;
         int iters = 2;
+        // --rs-time-map (LFQPLCYKMR): a per-pixel readout-time map file (training/rs_time_map.hpp); "" = the row rule
+        std::string time_map;
         // --motion-blur (LFQPLCYM): exposure_ms > 0 = the exposure blur (FastGSRollingShutter::exposure); learn_exposure =
         // a per-camera scale of it (Adam, exposure_lr per camera update, from learn_start, clamped to [0.5, 2]).
         bool motion_blur = false;
@@ -78,6 +82,9 @@ namespace lfs::training {
         [[nodiscard]] bool motion_learning(int iter) const;
         [[nodiscard]] bool readout_learning(int iter) const;
         [[nodiscard]] const std::string& description() const { return description_; }
+        // --rs-time-map: the start-up line ("" without a map) and whether a map is in use
+        [[nodiscard]] const std::string& time_map_description() const { return time_map_description_; }
+        [[nodiscard]] bool has_time_map() const { return time_map_host_.has_value(); }
         // --motion-blur: the start-up line ("" without --motion-blur), whether the scale is learned (at all / now),
         // a one-line summary of the learned scales (host copy: call rarely) and their file (name scale exposure_ms).
         [[nodiscard]] const std::string& blur_description() const { return blur_description_; }
@@ -113,6 +120,10 @@ namespace lfs::training {
         float* exp_scale_ = nullptr; // [N] learned scale (null = not learned)
         float* exp_state_ = nullptr; // [N,3] Adam m, v, steps
         float* exp_grad_ = nullptr;  // [1]
+        // --rs-time-map: the form (host) and, for a grid, its row fractions s on the device (no form = the row rule)
+        std::optional<RsTimeMap> time_map_host_;
+        float* time_map_ = nullptr;
+        std::string time_map_description_;
     };
 
 } // namespace lfs::training

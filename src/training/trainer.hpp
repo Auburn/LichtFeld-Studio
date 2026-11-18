@@ -874,6 +874,20 @@ namespace lfs::training {
         // when the seed was skipped or disabled; eval then uses exposure 0.
         std::optional<float> ppisp_exif_exposure_mean_;
         bool ppisp_dump_written_ = false; // LFQ: ppisp_final.txt written once at the last iteration
+        // --ppisp-exposure-guard (LFQPLCYKMREG) + its test hook LFS_PPISP_GUARD_INJECT=NAME:DELTA_EV:ITER[,...]
+        struct PPISPGuardInject {
+            int frame_idx;
+            float delta;
+            int iter;
+        };
+        int ppisp_guard_every_ = 1;
+        int64_t ppisp_guard_events_ = 0;
+        int64_t ppisp_guard_logged_ = 0;
+        bool ppisp_guard_summary_written_ = false;
+        std::unordered_map<int, int> ppisp_guard_trips_; // frame index -> projections
+        std::vector<std::string> ppisp_frame_names_;      // frame index -> image name
+        std::vector<PPISPGuardInject> ppisp_guard_injects_;
+        void ppisp_guard_after_step(int iter);
         mutable std::atomic<int> eval_ppisp_applied_{0};
         mutable std::atomic<int> eval_ppisp_exif_{0};
         mutable std::atomic<int> eval_ppisp_nearest_{0};

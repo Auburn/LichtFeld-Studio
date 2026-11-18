@@ -1178,6 +1178,13 @@ namespace lfs::core::param {
                        "and CRF still train. Requires --ppisp")
             .flags(PROP_ADVANCED)
             .all_strategies()
+            .float_prop(&OptimizationParameters::ppisp_exposure_guard,
+                        "ppisp_exposure_guard", "PPISP Exposure Guard (EV)", d.ppisp_exposure_guard, 0.0f, 16.0f,
+                        "Exposure guard: after every PPISP step, a frame whose learned exposure is more than this many EV off the "
+                        "median of its +-6 temporal neighbours (training images in video-frame order) is projected back to that "
+                        "median and its exposure Adam moments are cleared. 0 = off. Requires --ppisp with per-frame exposure training")
+            .flags(PROP_ADVANCED)
+            .all_strategies()
             .int_prop(&OptimizationParameters::ppisp_controller_activation_step,
                       "ppisp_controller_activation_step", "Controller Step", d.ppisp_controller_activation_step, -1, 100000,
                       "Iteration to start controller distillation (negative = final 5000 planned steps)")

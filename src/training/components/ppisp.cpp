@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <format>
 #include <fstream>
 #include <optional>
@@ -1155,6 +1156,78 @@ namespace lfs::training {
              static_cast<int>(vignetting_params_.numel())},
             color_group,
             crf_group, lr, beta1, beta2, bc1_rcp, bc2_sqrt_rcp, eps, nullptr);
+    }
+
+    // --ppisp-exposure-guard (LFQPLCYKMREG) ------------------------------------------------------------------------
+    void PPISP::set_exposure_guard(const float ev, std::vector<std::vector<int>> neighbours) {
+        assert(finalized_);
+        if (static_cast<int>(neighbours.size()) != num_frames_)
+            throw std::runtime_error(std::format("PPISP exposure guard: {} neighbour lists for {} frames", neighbours.size(), num_frames_));
+        for (const auto& nb : neighbours)
+            for (const int j : nb)
+                if (j < 0 || j >= num_frames_)
+                    throw std::runtime_error(std::format("PPISP exposure guard: neighbour index {} out of range", j));
+        guard_ev_ = std::isfinite(ev) && ev > 0.0f ? ev : 0.0f;
+        guard_neighbours_ = std::move(neighbours);
+    }
+
+    std::vector<float> PPISP::exposure_host() const {
+        assert(finalized_);
+        const auto host = exposure_params_.cpu();
+        const float* const p = host.ptr<float>();
+        return std::vector<float>(p, p + num_frames_);
+    }
+
+    float PPISP::neighbour_median(const std::vector<float>& ev, const int frame_idx) const {
+        if (frame_idx < 0 || frame_idx >= static_cast<int>(guard_neighbours_.size()))
+            return std::numeric_limits<float>::quiet_NaN();
+        std::vector<float> v;
+        v.reserve(guard_neighbours_[frame_idx].size());
+        for (const int j : guard_neighbours_[frame_idx])
+            if (std::isfinite(ev[j]))
+                v.push_back(ev[j]);
+        if (v.size() < 2)
+            return std::numeric_limits<float>::quiet_NaN();
+        std::sort(v.begin(), v.end());
+        const size_t n = v.size();
+        return (n % 2) ? v[n / 2] : 0.5f * (v[n / 2 - 1] + v[n / 2]);
+    }
+
+    std::vector<PPISP::ExposureGuardEvent> PPISP::apply_exposure_guard() {
+        std::vector<ExposureGuardEvent> events;
+        if (!(guard_ev_ > 0.0f) || lock_frames_ || num_frames_ <= 0 || guard_neighbours_.empty())
+            return events;
+        auto host = exposure_params_.cpu(); // synchronous readback of [num_frames] floats
+        float* const e = host.ptr<float>();
+        const std::vector<float> before(e, e + num_frames_);
+        for (int f = 0; f < num_frames_; ++f) {
+            const float med = neighbour_median(before, f);
+            if (!std::isfinite(med))
+                continue;
+            const float x = before[f];
+            if (!std::isfinite(x) || std::fabs(x - med) > guard_ev_) {
+                events.push_back({f, x, med});
+                e[f] = med;
+            }
+        }
+        if (!events.empty()) {
+            auto m1 = exposure_exp_avg_.cpu();
+            float* const m = m1.ptr<float>();
+            for (const auto& ev : events)
+                m[ev.frame_idx] = 0.0f;
+            exposure_params_.copy_from(host);
+            exposure_exp_avg_.copy_from(m1);
+        }
+        return events;
+    }
+
+    void PPISP::add_frame_exposure(const int frame_idx, const float delta) {
+        assert(finalized_);
+        if (frame_idx < 0 || frame_idx >= num_frames_)
+            return;
+        auto host = exposure_params_.cpu();
+        host.ptr<float>()[frame_idx] += delta;
+        exposure_params_.copy_from(host);
     }
 
     void PPISP::zero_grad() {

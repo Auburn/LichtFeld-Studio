@@ -1356,6 +1356,130 @@ namespace lfs::training {
                          config.train_crf);
             }
 
+            // --ppisp-exposure-guard EV (LFQPLCYKMREG) and its test hook LFS_PPISP_GUARD_INJECT (env)
+            ppisp_guard_events_ = 0;
+            ppisp_guard_logged_ = 0;
+            ppisp_guard_summary_written_ = false;
+            ppisp_guard_trips_.clear();
+            ppisp_guard_injects_.clear();
+            ppisp_frame_names_.clear();
+            {
+                const float guard = params_.optimization.ppisp_exposure_guard;
+                const char* inject_env = std::getenv("LFS_PPISP_GUARD_INJECT");
+                const bool inject = inject_env != nullptr && *inject_env;
+                if (guard > 0.0f && (!params_.optimization.use_ppisp || exposure_correction || ppisp_->lock_frames()))
+                    return std::unexpected("--ppisp-exposure-guard needs --ppisp, --no-exposure-correction and trained per-frame "
+                                           "exposure (not --ppisp-lock-frames)");
+                if (guard > 0.0f || inject) {
+                    auto env_int = [](const char* name, int def, int lo, int hi) -> std::expected<int, std::string> {
+                        const char* v = std::getenv(name);
+                        if (v == nullptr || !*v)
+                            return def;
+                        char* end = nullptr;
+                        const long x = std::strtol(v, &end, 10);
+                        if (end == v || *end != '\0' || x < lo || x > hi)
+                            return std::unexpected(std::format("{}='{}': an integer within [{}, {}] expected", name, v, lo, hi));
+                        return static_cast<int>(x);
+                    };
+                    const auto radius = env_int("LFS_PPISP_GUARD_RADIUS", 6, 1, 100);
+                    if (!radius)
+                        return std::unexpected(radius.error());
+                    const auto every = env_int("LFS_PPISP_GUARD_EVERY", 1, 1, 1000000);
+                    if (!every)
+                        return std::unexpected(every.error());
+                    ppisp_guard_every_ = *every;
+                    // the training images in video order: the frame number of "frame_<digits>" (as the rolling shutter and
+                    // the pose refinement order their neighbours), else by image name
+                    struct GuardFrame {
+                        long long frame;
+                        std::string name;
+                        int idx;
+                    };
+                    auto frame_number = [](const std::string& n) -> long long {
+                        const size_t p = n.find("frame_");
+                        if (p == std::string::npos)
+                            return -1;
+                        size_t q = p + 6;
+                        long long v = 0;
+                        bool any = false;
+                        while (q < n.size() && n[q] >= '0' && n[q] <= '9') {
+                            v = v * 10 + (n[q] - '0');
+                            ++q;
+                            any = true;
+                        }
+                        return any ? v : -1;
+                    };
+                    const int nf = ppisp_->num_frames();
+                    ppisp_frame_names_.assign(static_cast<size_t>(nf), std::string("?"));
+                    std::vector<GuardFrame> order;
+                    size_t unnumbered = 0;
+                    for (const auto& cam : train_dataset_->get_cameras()) {
+                        if (!cam || !ppisp_->is_known_frame(cam->uid()))
+                            continue;
+                        const int idx = ppisp_->frame_index(cam->uid());
+                        const auto& name = cam->image_name();
+                        const long long fnum = frame_number(name);
+                        unnumbered += fnum < 0 ? 1 : 0;
+                        order.push_back({fnum, name, idx});
+                        ppisp_frame_names_[static_cast<size_t>(idx)] = name;
+                    }
+                    if (static_cast<int>(order.size()) != nf || nf < 2)
+                        return std::unexpected(std::format("--ppisp-exposure-guard: {} training images for {} PPISP frames", order.size(), nf));
+                    std::sort(order.begin(), order.end(), [&](const GuardFrame& a, const GuardFrame& b) {
+                        if (unnumbered == 0 && a.frame != b.frame)
+                            return a.frame < b.frame;
+                        return a.name < b.name;
+                    });
+                    std::vector<std::vector<int>> neighbours(static_cast<size_t>(nf));
+                    for (int p = 0; p < nf; ++p)
+                        for (int q = std::max(0, p - *radius); q <= std::min(nf - 1, p + *radius); ++q)
+                            if (q != p)
+                                neighbours[static_cast<size_t>(order[static_cast<size_t>(p)].idx)].push_back(order[static_cast<size_t>(q)].idx);
+                    ppisp_->set_exposure_guard(guard, std::move(neighbours));
+                    if (guard > 0.0f)
+                        LOG_INFO("PPISP exposure guard (--ppisp-exposure-guard {} EV, LFQPLCYKMREG): after every {} PPISP step(s) a "
+                                 "frame whose exposure is more than {} EV off the median of its +-{} temporal neighbours ({} frames "
+                                 "in {} order, {} .. {}) is projected to that median and its exposure momentum (Adam exp_avg) "
+                                 "cleared; frames within the band are never touched",
+                                 guard, ppisp_guard_every_, guard, *radius, nf, unnumbered ? "image-name" : "video-frame",
+                                 order.front().name, order.back().name);
+                    if (inject) {
+                        const std::string spec(inject_env);
+                        size_t pos = 0;
+                        while (pos < spec.size()) {
+                            const size_t comma = std::min(spec.find(',', pos), spec.size());
+                            const std::string item = spec.substr(pos, comma - pos);
+                            pos = comma + 1;
+                            if (item.empty())
+                                continue;
+                            const size_t c1 = item.find(':'), c2 = item.rfind(':');
+                            if (c1 == std::string::npos || c2 == c1)
+                                return std::unexpected(std::format("LFS_PPISP_GUARD_INJECT: '{}': NAME:DELTA_EV:ITER expected", item));
+                            const std::string name = item.substr(0, c1);
+                            const std::string ds = item.substr(c1 + 1, c2 - c1 - 1), is = item.substr(c2 + 1);
+                            char* e1 = nullptr;
+                            char* e2 = nullptr;
+                            const float delta = std::strtof(ds.c_str(), &e1);
+                            const long it = std::strtol(is.c_str(), &e2, 10);
+                            if (e1 == ds.c_str() || *e1 != '\0' || !std::isfinite(delta) || e2 == is.c_str() || *e2 != '\0' || it < 1)
+                                return std::unexpected(std::format("LFS_PPISP_GUARD_INJECT: '{}': NAME:DELTA_EV:ITER expected", item));
+                            int found = -1;
+                            for (int f = 0; f < nf; ++f) {
+                                const auto& n = ppisp_frame_names_[static_cast<size_t>(f)];
+                                if (n == name || n == name + ".png" || (n.size() > 4 && n.ends_with(".png") && n.substr(0, n.size() - 4) == name))
+                                    found = f;
+                            }
+                            if (found < 0)
+                                return std::unexpected(std::format("LFS_PPISP_GUARD_INJECT: no training image '{}'", name));
+                            ppisp_guard_injects_.push_back({found, delta, static_cast<int>(it)});
+                            LOG_INFO("LFS_PPISP_GUARD_INJECT (test hook): frame {} gets {:+g} EV added to its exposure after the PPISP "
+                                     "step of iteration {} (guard {})", ppisp_frame_names_[static_cast<size_t>(found)], delta, it,
+                                     guard > 0.0f ? std::format("{} EV", guard) : std::string("off"));
+                        }
+                    }
+                }
+            }
+
             return {};
         } catch (const std::exception& e) {
             return std::unexpected(std::format("Failed to init PPISP: {}", e.what()));
@@ -6505,6 +6629,78 @@ namespace lfs::training {
         return thin_structure_map_buffer_;
     }
 
+    // --ppisp-exposure-guard (LFQPLCYKMREG): the guard pass after a PPISP step, its log lines, and the test hook
+    // LFS_PPISP_GUARD_INJECT (a delta added to a frame's exposure after the step of a given iteration, then watched).
+    void Trainer::ppisp_guard_after_step(const int iter) {
+        if (!ppisp_)
+            return;
+        const int total = get_total_iterations();
+        const float guard = ppisp_->exposure_guard();
+        auto name_of = [&](const int f) -> const std::string& {
+            static const std::string unknown("?");
+            return f >= 0 && f < static_cast<int>(ppisp_frame_names_.size()) ? ppisp_frame_names_[static_cast<size_t>(f)] : unknown;
+        };
+        if (guard > 0.0f && (iter % ppisp_guard_every_ == 0 || iter >= total)) {
+            const auto events = ppisp_->apply_exposure_guard();
+            for (const auto& e : events) {
+                ++ppisp_guard_events_;
+                const int trips = ++ppisp_guard_trips_[e.frame_idx];
+                if (ppisp_guard_logged_ < 200) {
+                    ++ppisp_guard_logged_;
+                    LOG_INFO("PPISP exposure guard: iteration {}: frame {} exposure {:+.3f} EV was {:+.3f} EV off its neighbours' "
+                             "median {:+.3f}: projected to the median, momentum cleared (projection {} of this frame){}",
+                             iter, name_of(e.frame_idx), e.ev, e.ev - e.median, e.median, trips,
+                             ppisp_guard_logged_ == 200 ? "; further projections are only counted" : "");
+                }
+            }
+            if (iter % 10000 == 0 && iter < total)
+                LOG_INFO("PPISP exposure guard: iteration {}: {} projections of {} frames so far", iter, ppisp_guard_events_,
+                         ppisp_guard_trips_.size());
+        }
+        for (const auto& inj : ppisp_guard_injects_) {
+            if (inj.iter != iter)
+                continue;
+            const float before = ppisp_->exposure_host()[static_cast<size_t>(inj.frame_idx)];
+            ppisp_->add_frame_exposure(inj.frame_idx, inj.delta);
+            LOG_INFO("LFS_PPISP_GUARD_INJECT: iteration {}: frame {} exposure {:+.4f} -> {:+.4f} EV (test hook)", iter,
+                     name_of(inj.frame_idx), before, before + inj.delta);
+        }
+        if (!ppisp_guard_injects_.empty() && (iter % 50 == 0 || iter >= total)) {
+            const auto ev = ppisp_->exposure_host();
+            for (const auto& inj : ppisp_guard_injects_) {
+                const float med = ppisp_->neighbour_median(ev, inj.frame_idx);
+                LOG_INFO("LFS_PPISP_GUARD_INJECT watch: iteration {}: frame {} exposure {:+.4f} EV, neighbours' median {:+.4f}, "
+                         "off by {:+.4f}", iter, name_of(inj.frame_idx), ev[static_cast<size_t>(inj.frame_idx)], med,
+                         ev[static_cast<size_t>(inj.frame_idx)] - med);
+            }
+        }
+        if (guard > 0.0f && iter >= total && !ppisp_guard_summary_written_) {
+            ppisp_guard_summary_written_ = true;
+            const auto ev = ppisp_->exposure_host();
+            float worst = 0.0f;
+            int worst_f = -1;
+            for (int f = 0; f < static_cast<int>(ev.size()); ++f) {
+                const float med = ppisp_->neighbour_median(ev, f);
+                if (std::isfinite(med) && std::fabs(ev[static_cast<size_t>(f)] - med) > worst) {
+                    worst = std::fabs(ev[static_cast<size_t>(f)] - med);
+                    worst_f = f;
+                }
+            }
+            std::vector<std::pair<int, int>> repeat;
+            for (const auto& [f, n] : ppisp_guard_trips_)
+                if (n > 1)
+                    repeat.emplace_back(n, f);
+            std::sort(repeat.rbegin(), repeat.rend());
+            std::string rep;
+            for (size_t k = 0; k < std::min<size_t>(repeat.size(), 20); ++k)
+                rep += std::format("{}{} x{}", k ? ", " : "", name_of(repeat[k].second), repeat[k].first);
+            LOG_INFO("PPISP exposure guard at iteration {}: {} projections of {} frames over the run; projected more than once: {}; "
+                     "now every frame is within {:.3f} EV of its neighbours' median (largest |off| {:.3f} EV, frame {})",
+                     iter, ppisp_guard_events_, ppisp_guard_trips_.size(), repeat.empty() ? std::string("none") : rep, guard,
+                     worst, name_of(worst_f));
+        }
+    }
+
     void Trainer::clearEdgeWeightCache() {
         edge_weight_cache_.clear();
         edge_weight_cache_bytes_ = 0;
@@ -9457,6 +9653,8 @@ namespace lfs::training {
                         loss_tensor_gpu = loss_tensor_gpu + ppisp_->reg_loss_gpu();
                         ppisp_->reg_backward();
                         ppisp_->optimizer_step();
+                        if (ppisp_->has_guard_neighbours()) // --ppisp-exposure-guard / LFS_PPISP_GUARD_INJECT (LFQPLCYKMREG)
+                            ppisp_guard_after_step(iter);
                         if (step_params.use_exposure_correction) {
                             nvtxRangePush("ppisp_project_mean");
                             ppisp_->project_mean();

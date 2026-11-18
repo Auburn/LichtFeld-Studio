@@ -1190,6 +1190,12 @@ namespace lfs::core {
                 return "--ppisp-lock-frames requires --ppisp (and --no-exposure-correction)";
             if (ppisp_lock_colour && !use_ppisp)
                 return "--ppisp-lock-colour requires --ppisp (and --no-exposure-correction)";
+            if (!std::isfinite(ppisp_exposure_guard) || (ppisp_exposure_guard != 0.0f && (ppisp_exposure_guard < 0.05f || ppisp_exposure_guard > 16.0f)))
+                return std::format("ppisp_exposure_guard must be 0 (off) or within [0.05, 16] EV (got {})", ppisp_exposure_guard);
+            if (ppisp_exposure_guard > 0.0f && !use_ppisp)
+                return "--ppisp-exposure-guard requires --ppisp (and --no-exposure-correction)";
+            if (ppisp_exposure_guard > 0.0f && ppisp_lock_frames)
+                return "--ppisp-exposure-guard has nothing to guard with --ppisp-lock-frames (per-frame exposure is locked)";
             if (!std::isfinite(ppisp_reg_weight) || ppisp_reg_weight < 0.0f || ppisp_reg_weight > 1000.0f)
                 return std::format("ppisp_reg_weight must be within [0, 1000] (got {})", ppisp_reg_weight);
             if (depth_loss_mode != "ssi" && depth_loss_mode != "ssi-disparity" && depth_loss_mode != "ssi-depth")

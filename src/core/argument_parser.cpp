@@ -173,6 +173,7 @@ namespace lfs::core::args {
             OptimizationCliBinding{"--ppisp-freeze", "ppisp_freeze_from_sidecar", Bool},
             OptimizationCliBinding{"--ppisp-lock-frames", "ppisp_lock_frames", Bool},
             OptimizationCliBinding{"--ppisp-lock-colour", "ppisp_lock_colour", Bool},
+            OptimizationCliBinding{"--ppisp-exposure-guard", "ppisp_exposure_guard", Float},
             OptimizationCliBinding{"--ppisp-reg-weight", "ppisp_reg_weight", Float},
             OptimizationCliBinding{"--gut", "gut", Bool},
             OptimizationCliBinding{"--eval", "enable_eval", Bool},
@@ -1062,6 +1063,7 @@ namespace {
             ::args::Flag ppisp_freeze_from_sidecar(rendering_group, "ppisp_freeze", lfs::core::args::optimization_cli_help("--ppisp-freeze"), {"ppisp-freeze"});
             ::args::Flag ppisp_lock_frames(rendering_group, "ppisp_lock_frames", lfs::core::args::optimization_cli_help("--ppisp-lock-frames"), {"ppisp-lock-frames"});
             ::args::Flag ppisp_lock_colour(rendering_group, "ppisp_lock_colour", lfs::core::args::optimization_cli_help("--ppisp-lock-colour"), {"ppisp-lock-colour"});
+            ::args::ValueFlag<float> ppisp_exposure_guard(rendering_group, "EV", lfs::core::args::optimization_cli_help("--ppisp-exposure-guard"), {"ppisp-exposure-guard"});
             ::args::ValueFlag<float> ppisp_reg_weight(rendering_group, "w", lfs::core::args::optimization_cli_help("--ppisp-reg-weight"), {"ppisp-reg-weight"});
             ::args::ValueFlag<std::string> ppisp_sidecar_path(rendering_group, "path", "Path to PPISP sidecar (.ppisp) used for frozen PPISP training", {"ppisp-sidecar"});
             ::args::Flag gut(rendering_group, "gut", lfs::core::args::optimization_cli_help("--gut"), {"gut"});
@@ -1644,6 +1646,10 @@ namespace {
             if (aniso_start && ::args::get(aniso_start) < 0) {
                 return std::unexpected("ERROR: --aniso-start must be >= 0");
             }
+            if (ppisp_exposure_guard && (!std::isfinite(::args::get(ppisp_exposure_guard)) || (::args::get(ppisp_exposure_guard) != 0.0f &&
+                                         (::args::get(ppisp_exposure_guard) < 0.05f || ::args::get(ppisp_exposure_guard) > 16.0f)))) {
+                return std::unexpected("ERROR: --ppisp-exposure-guard must be 0 (off) or within [0.05, 16] EV");
+            }
             if (thick_max_ratio && (!std::isfinite(::args::get(thick_max_ratio)) || (::args::get(thick_max_ratio) != 0.0f &&
                                     (::args::get(thick_max_ratio) < 1.0f || ::args::get(thick_max_ratio) > 1e6f)))) {
                 return std::unexpected("ERROR: --thick-max-ratio must be 0 (off) or within [1, 1e6]");
@@ -1893,6 +1899,7 @@ namespace {
                                         ppisp_freeze_from_sidecar_flag = bool(ppisp_freeze_from_sidecar),
                                         ppisp_lock_frames_flag = bool(ppisp_lock_frames),
                                         ppisp_lock_colour_flag = bool(ppisp_lock_colour),
+                                        ppisp_exposure_guard_val = cli_option_present({"--ppisp-exposure-guard"}) ? std::optional<float>(::args::get(ppisp_exposure_guard)) : std::optional<float>(),
                                         ppisp_reg_weight_val = cli_option_present({"--ppisp-reg-weight"}) ? std::optional<float>(::args::get(ppisp_reg_weight)) : std::optional<float>(),
                                         ppisp_sidecar_path_val = cli_option_present({"--ppisp-sidecar"}) ? std::optional<std::string>(::args::get(ppisp_sidecar_path)) : std::optional<std::string>(),
                                         enable_eval_flag = bool(enable_eval),
@@ -2169,6 +2176,7 @@ namespace {
                 setFlag(ppisp_freeze_from_sidecar_flag, opt.ppisp_freeze_from_sidecar);
                 setFlag(ppisp_lock_frames_flag, opt.ppisp_lock_frames);
                 setFlag(ppisp_lock_colour_flag, opt.ppisp_lock_colour);
+                setVal(ppisp_exposure_guard_val, opt.ppisp_exposure_guard);
                 setVal(ppisp_reg_weight_val, opt.ppisp_reg_weight);
                 if (ppisp_sidecar_path_val) {
                     opt.ppisp_sidecar_path = lfs::core::utf8_to_path(*ppisp_sidecar_path_val);
@@ -2380,6 +2388,7 @@ namespace {
                 note_opt("ppisp_freeze_from_sidecar", ppisp_freeze_from_sidecar_flag);
                 note_opt("ppisp_lock_frames", ppisp_lock_frames_flag);
                 note_opt("ppisp_lock_colour", ppisp_lock_colour_flag);
+                note_opt("ppisp_exposure_guard", ppisp_exposure_guard_val.has_value());
                 note_opt("ppisp_reg_weight", ppisp_reg_weight_val.has_value());
                 note_opt("ppisp_sidecar_path", ppisp_sidecar_path_val.has_value());
                 note_opt("enable_eval", enable_eval_flag || eval_all_flag);

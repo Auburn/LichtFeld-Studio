@@ -110,6 +110,34 @@ namespace lfs::training {
         void set_lock_colour(bool lock) { lock_colour_ = lock; }
         [[nodiscard]] bool lock_colour() const { return lock_colour_; }
 
+        /// --ppisp-exposure-guard EV (LFQPLCYKMREG): neighbours[f] = the frame indices of frame f's temporal neighbours
+        /// (+-R training images in video-frame order, f itself excluded). ev <= 0 = off. Not serialized.
+        void set_exposure_guard(float ev, std::vector<std::vector<int>> neighbours);
+        [[nodiscard]] float exposure_guard() const { return guard_ev_; }
+        [[nodiscard]] bool has_guard_neighbours() const { return !guard_neighbours_.empty(); }
+        struct ExposureGuardEvent {
+            int frame_idx;
+            float ev;     // the exposure before the projection
+            float median; // the neighbours' median (= the exposure after it)
+        };
+        /// One guard pass (synchronous: reads the [num_frames] exposures back): every frame whose exposure is more than
+        /// the guard EV off the median of its neighbours' exposures (all medians taken from the values BEFORE this pass) is
+        /// set to that median and its exposure first moment (Adam exp_avg) is cleared; the second moment is kept, so the
+        /// frame's step size stays what its own gradient history made it. Returns the projected frames (empty: nothing
+        /// written). No-op when the guard is off or the per-frame latents are locked.
+        std::vector<ExposureGuardEvent> apply_exposure_guard();
+        /// The per-frame exposures on the host (synchronous; diagnostics).
+        [[nodiscard]] std::vector<float> exposure_host() const;
+        /// Median of frame f's neighbours in `ev` (NaN if it has fewer than 2 finite neighbours).
+        [[nodiscard]] float neighbour_median(const std::vector<float>& ev, int frame_idx) const;
+        /// Test hook (LFS_PPISP_GUARD_INJECT): add delta EV to one frame's exposure (moments untouched).
+        void add_frame_exposure(int frame_idx, float delta);
+        /// The frame index of a registered UID (-1 if unknown).
+        [[nodiscard]] int frame_index(int uid) const {
+            const auto it = uid_to_frame_idx_.find(uid);
+            return it == uid_to_frame_idx_.end() ? -1 : it->second;
+        }
+
         /// Plain-text dump of every learned PPISP parameter (raw values as stored), for offline analysis (LFQ).
         /// frame_names: image name per registered frame UID (missing names are written as "?").
         [[nodiscard]] std::expected<void, std::string> write_text_dump(
@@ -345,6 +373,8 @@ namespace lfs::training {
         bool finalized_ = false;
         bool lock_frames_ = false; // --ppisp-lock-frames: never step or project per-frame exposure/colour
         bool lock_colour_ = false; // --ppisp-lock-colour: never step the per-frame colour latents (exposure still trains)
+        float guard_ev_ = 0.0f;    // --ppisp-exposure-guard (LFQPLCYKMREG): 0 = off
+        std::vector<std::vector<int>> guard_neighbours_;
         std::optional<float> exif_exposure_mean_;
 
         // ZCA pinv block-diagonal matrix for color mean regularization [8x8]

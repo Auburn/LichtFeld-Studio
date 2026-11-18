@@ -1182,7 +1182,7 @@ namespace lfs::core::param {
                         "ppisp_exposure_guard", "PPISP Exposure Guard (EV)", d.ppisp_exposure_guard, 0.0f, 16.0f,
                         "Exposure guard: after every PPISP step, a frame whose learned exposure is more than this many EV off the "
                         "median of its +-6 temporal neighbours (training images in video-frame order) is projected back to that "
-                        "median and its exposure Adam moments are cleared. 0 = off. Requires --ppisp with per-frame exposure training")
+                        "median and its exposure momentum (Adam first moment) is cleared. 0 = off. Requires --ppisp with per-frame exposure training")
             .flags(PROP_ADVANCED)
             .all_strategies()
             .int_prop(&OptimizationParameters::ppisp_controller_activation_step,

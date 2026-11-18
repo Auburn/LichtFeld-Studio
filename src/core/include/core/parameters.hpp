@@ -538,7 +538,7 @@ namespace lfs::core {
             bool ppisp_lock_colour = false;
             // --ppisp-exposure-guard EV (LFQPLCYKMREG; 0 = off): after every PPISP step, a frame whose learned exposure is more
             // than EV stops off the median of its temporal neighbours (+-6 training images in video-frame order) is projected
-            // back to that median and its exposure Adam moments are cleared ("stuck" exposures that ran away and never recover).
+            // back to that median and its exposure momentum (Adam first moment) is cleared ("stuck" exposures that never recover).
             float ppisp_exposure_guard = 0.0f;
             std::filesystem::path ppisp_sidecar_path = {};
             PPISPHoldoutAppearance ppisp_holdout_appearance = PPISPHoldoutAppearance::Nearest;

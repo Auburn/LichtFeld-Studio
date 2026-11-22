@@ -38,6 +38,7 @@ tests/data/nn/*
 !scripts/lichtfeld_mcp_bridge.py
 !scripts/verify_video_orientation.py
 !tools/gdb/lfs_pretty_printers.py
+!tools/fpv_recipe/*.py
 !src/python/_lfs_panel_contract.py
 !src/python/_lfs_path_io.py
 !src/python/lfs_splat_lod_hierarchy.py

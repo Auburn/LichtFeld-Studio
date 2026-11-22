@@ -1,0 +1,5 @@
+# tools/fpv_recipe: the FPV recipe's input scripts (tested with numpy 1.26 / scipy 1.17 / opencv 4.11 and
+# numpy 2.5 / scipy 1.18 / opencv 5.0). build_rs_map.py also needs ffmpeg and ffprobe on PATH.
+numpy>=1.24
+scipy>=1.10
+opencv-python>=4.5

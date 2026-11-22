@@ -80,6 +80,8 @@ seg 1 ...
 - θd = θ·P(u), with u = θ².
 - On each segment, P is a quintic Hermite polynomial in t = (u − u0)·inv_h, so the profile is C2.
 - The loader checks three things: θd/θ ≈ 1 on the axis, θd increasing over the whole table, and B > 0.
+- [`tools/fpv_recipe/lens_radial.py`](tools/fpv_recipe/README.md#lens_radialpy-radial-lens-table) builds the table
+  from a θ → θd profile sampled from any calibration, and writes the paired `cameras.txt` line.
 
 ### Pose refinement
 
@@ -124,6 +126,8 @@ name  wx wy wz  ax ay az  vx vy vz  Ax Ay Az
 
 An image without a line is trained with a global shutter. The motion usually comes from the camera path (for example,
 differentiated SfM poses or a flight controller's gyro log).
+[`tools/fpv_recipe/rs_motion.py`](tools/fpv_recipe/README.md#rs_motionpy-rolling-shutter-motion) makes it from a
+COLMAP camera path.
 
 | Flag | Default | Meaning |
 |---|---|---|
@@ -159,6 +163,9 @@ The time is normalised so that `--rs-readout-ms` keeps its meaning:
 - s = (t(u, v) − t(centre)) / R, and the splat is drawn at s × `--rs-readout-ms`;
 - R is the least-squares slope of t against the row, times H;
 - a linear form reproduces the row rule exactly.
+
+[`tools/fpv_recipe/build_rs_map.py` and `fit_rs_radial.py`](tools/fpv_recipe/README.md#build_rs_mappy-and-fit_rs_radialpy-readout-time-map)
+measure the map from an LED video and write both forms.
 
 ## Motion blur
 
@@ -226,7 +233,8 @@ The cube is exported to `bg_cubemap/faces.npy`. `LFS_CUBEMAP_DUMP=<iter>` also w
 `cubemap_dump/bg_<iter>.npy` at that iteration.
 
 The recipe starts from a prepared horizon cube and freezes it (`--bg-cubemap-lr 0`), so the splats can't push detail
-into the sky.
+into the sky. [`tools/fpv_recipe/cubemap_horizon.py`](tools/fpv_recipe/README.md#cubemap_horizonpy-horizon-cube) makes
+it: a cube (such as a run's `bg_cubemap/faces.npy`) kept below the horizon and faded to the 249 grey above it.
 
 ---
 
@@ -483,8 +491,11 @@ LFS_POSE_SNAPSHOTS=1 LichtFeld-Studio --headless -d <dataset> -o <out> \
 
 These flags all work. They just weren't adopted for this scene.
 
-**Inputs this repo doesn't make.** The lens table, the motion file, the time map and the horizon cube come from
-external calibration scripts. The formats above are everything the trainer needs.
+**Making the inputs.** The scripts in [`tools/fpv_recipe/`](tools/fpv_recipe/README.md) make the recipe's four input
+files: `rs_motion.py` the motion file, `build_rs_map.py` + `fit_rs_radial.py` the time map (from a video of a flickering
+LED), `lens_radial.py` the lens table (from any calibration's sampled θ → θd profile) and `cubemap_horizon.py` the
+horizon cube. They need only numpy, scipy and OpenCV (plus ffmpeg for the LED video). Files made another way work as
+long as they follow the formats above.
 
 ---
 

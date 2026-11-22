@@ -466,9 +466,9 @@ LFS_POSE_SNAPSHOTS=1 LichtFeld-Studio --headless -d <dataset> -o <out> \
 ```json
 {
   "strategy": "mrnf", "iterations": 30000, "sh_degree": 3,
-  "means_lr": 2.17871e-05, "opacity_lr": 0.012, "scaling_lr": 0.00828016, "rotation_lr": 0.0015,
-  "lambda_dssim": 0.22, "refine_every": 163, "stop_refine": 28500, "min_opacity": 0.00392157,
-  "growth_exchange": true
+  "means_lr": 2.17871e-05, "shs_lr": -1.0, "opacity_lr": 0.012, "scaling_lr": 0.00828016, "rotation_lr": 0.0015,
+  "lambda_dssim": 0.22, "refine_every": 163, "start_refine": 0, "stop_refine": 28500,
+  "min_opacity": 0.00392156862745098, "growth_exchange": true
 }
 ```
 
